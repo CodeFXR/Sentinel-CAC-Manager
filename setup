@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Sentinel CAC Manager - Setup Wizard Launcher
+# Launches the graphical installer. If run standalone, auto-fetches the repo.
+# ==============================================================================
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_DIR="${HOME}/.local/share/sentinel_cac_manager"
+REPO_URL="https://github.com/CodeFXR/Sentinel-CAC-Manager/archive/refs/heads/main.tar.gz"
+
+# 1. If installer.py exists locally, run it
+if [ -f "${SCRIPT_DIR}/installer.py" ]; then
+    exec python3 "${SCRIPT_DIR}/installer.py" "$@"
+fi
+
+# 2. Standalone web bootstrapper mode
+echo "[*] Initializing Sentinel CAC Manager installer..."
+mkdir -p "${INSTALL_DIR}"
+
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "${REPO_URL}" | tar -xz -C "${INSTALL_DIR}" --strip-components=1
+elif command -v wget >/dev/null 2>&1; then
+    wget -qO- "${REPO_URL}" | tar -xz -C "${INSTALL_DIR}" --strip-components=1
+else
+    echo "[-] Error: curl or wget required to download Sentinel CAC Manager."
+    exit 1
+fi
+
+exec python3 "${INSTALL_DIR}/installer.py" "$@"

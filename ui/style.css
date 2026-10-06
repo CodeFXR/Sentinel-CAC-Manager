@@ -1,0 +1,192 @@
+/* Sentinel v2 Modern Styling & Animations */
+
+/* Custom military-grade cybersecurity palette */
+@define-color sentinel_bg #0f141c;
+@define-color sentinel_surface #161f2e;
+@define-color sentinel_surface_hover #1e293b;
+@define-color sentinel_accent #0284c7;
+@define-color sentinel_accent_hover #0369a1;
+@define-color sentinel_cyan #38bdf8;
+@define-color sentinel_success #10b981;
+@define-color sentinel_warning #f59e0b;
+@define-color sentinel_danger #ef4444;
+
+window {
+    background-color: @sentinel_bg;
+}
+
+/* HeaderBar Styling */
+headerbar {
+    background: @sentinel_surface;
+    border-bottom: 1px solid rgba(56, 189, 248, 0.15);
+}
+
+.header-icon {
+    margin-right: 8px;
+    border-radius: 6px;
+}
+
+/* Hero Section */
+.hero-card {
+    background: linear-gradient(135deg, rgba(2, 132, 199, 0.12) 0%, rgba(15, 23, 42, 0.8) 100%);
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    border-radius: 16px;
+    padding: 24px;
+    margin-bottom: 16px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+}
+
+.hero-title {
+    font-size: 24px;
+    font-weight: 800;
+    color: #f8fafc;
+    margin-bottom: 4px;
+}
+
+.hero-subtitle {
+    font-size: 14px;
+    color: #94a3b8;
+    margin-bottom: 16px;
+}
+
+/* Status Banners */
+.banner-ready {
+    background: linear-gradient(90deg, rgba(16, 185, 129, 0.2) 0%, rgba(5, 150, 105, 0.1) 100%);
+    border: 1px solid rgba(16, 185, 129, 0.4);
+    border-radius: 10px;
+    padding: 10px 16px;
+    color: #34d399;
+    font-weight: 600;
+}
+
+.banner-warning {
+    background: linear-gradient(90deg, rgba(245, 158, 11, 0.2) 0%, rgba(217, 119, 6, 0.1) 100%);
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    border-radius: 10px;
+    padding: 10px 16px;
+    color: #fbbf24;
+    font-weight: 600;
+}
+
+/* Master Action Button */
+.master-setup-btn {
+    background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
+    color: #ffffff;
+    font-weight: 700;
+    font-size: 15px;
+    border-radius: 28px;
+    padding: 12px 28px;
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    box-shadow: 0 4px 14px rgba(2, 132, 199, 0.4);
+    transition: all 200ms ease-in-out;
+}
+
+.master-setup-btn:hover {
+    background: linear-gradient(135deg, #0369a1 0%, #0284c7 100%);
+    box-shadow: 0 6px 20px rgba(56, 189, 248, 0.6);
+    transform: translateY(-1px);
+}
+
+.master-setup-btn:active {
+    transform: translateY(1px);
+}
+
+/* Pulsing Status Dot */
+.dot-green {
+    color: #10b981;
+    font-size: 16px;
+}
+
+.dot-amber {
+    color: #f59e0b;
+    font-size: 16px;
+}
+
+.dot-red {
+    color: #ef4444;
+    font-size: 16px;
+}
+
+/* Status Badges */
+.badge-success {
+    background: rgba(16, 185, 129, 0.2);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.4);
+    border-radius: 12px;
+    padding: 3px 10px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.badge-warning {
+    background: rgba(245, 158, 11, 0.2);
+    color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    border-radius: 12px;
+    padding: 3px 10px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.badge-danger {
+    background: rgba(239, 68, 68, 0.2);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    border-radius: 12px;
+    padding: 3px 10px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.badge-info {
+    background: rgba(56, 189, 248, 0.2);
+    color: #38bdf8;
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    border-radius: 12px;
+    padding: 3px 10px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+/* Certificate Card */
+.cert-card {
+    background: @sentinel_surface;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 12px;
+    transition: all 150ms ease-in-out;
+}
+
+.cert-card:hover {
+    border-color: rgba(56, 189, 248, 0.35);
+    background: @sentinel_surface_hover;
+}
+
+.cert-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #f1f5f9;
+}
+
+.cert-issuer {
+    font-size: 12px;
+    color: #38bdf8;
+    font-weight: 600;
+}
+
+.cert-validity {
+    font-size: 12px;
+    color: #94a3b8;
+}
+
+/* Activity Log TextView */
+.log-view {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Monospace', monospace;
+    font-size: 12px;
+    background: #090d13;
+    color: #10b981;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 12px;
+}
