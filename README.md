@@ -1,20 +1,31 @@
-# Sentinel CAC Manager
+<div align="center">
+  <img src="sentinel_cac_manager.png" alt="Sentinel CAC Manager" width="220" />
 
-[![Platform](https://img.shields.io/badge/Platform-Linux-blue.svg)](https://www.kernel.org/)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![UI](https://img.shields.io/badge/UI-GTK4%20%2F%20Libadwaita-green.svg)](https://gnome.pages.gitlab.gnome.org/libadwaita/)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+  <h1>Sentinel CAC Manager</h1>
 
-**Graphical interface for configuring a Department of War (DoW) CAC smart card on Linux.**
+  <p>
+    <strong>Graphical interface for configuring smart cards on Linux.</strong>
+  </p>
+
+  <p>
+    <img src="https://img.shields.io/badge/Platform-Linux-blue.svg?style=flat-square" alt="Platform" />
+    <img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg?style=flat-square&logo=python" alt="Python" />
+    <img src="https://img.shields.io/badge/UI-GTK4%20%2F%20Libadwaita-00ADD8.svg?style=flat-square" alt="UI" />
+    <img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License" />
+  </p>
+
+  <p>
+    <img src="https://img.shields.io/badge/Fedora-Tested-294172?style=flat-square&logo=fedora&logoColor=white" alt="Fedora" />
+    <img src="https://img.shields.io/badge/Ubuntu-Tested-E95420?style=flat-square&logo=ubuntu&logoColor=white" alt="Ubuntu" />
+    <img src="https://img.shields.io/badge/Debian-Tested-A81D33?style=flat-square&logo=debian&logoColor=white" alt="Debian" />
+    <img src="https://img.shields.io/badge/Linux_Mint-Tested-87CF3E?style=flat-square&logo=linuxmint&logoColor=white" alt="Linux Mint" />
+    <img src="https://img.shields.io/badge/Pop!_OS-Tested-48B9C7?style=flat-square&logo=popos&logoColor=white" alt="Pop!_OS" />
+    <img src="https://img.shields.io/badge/RHEL-Tested-EE0000?style=flat-square&logo=redhat&logoColor=white" alt="RHEL" />
+    <img src="https://img.shields.io/badge/Zorin_OS-Tested-0CC1EC?style=flat-square&logo=zorin&logoColor=white" alt="Zorin OS" />
+  </p>
+</div>
 
 Sentinel CAC Manager verifies the smart card stack, installs the Department of War root and intermediate certificate authorities into the system trust store, registers security devices with supported web browsers, and monitors smart card insertion and certificate status.
-
-```
-     ____         __  _          __
-    / __/__ ___  / /_(_)__  ___ / /
-   _\ \/ -_) _ \/ __/ / _ \/ -_) / 
-  /___/\__/_//_/\__/_/_//_/\__/_/  
-```
 
 ## What It Does
 
@@ -24,20 +35,14 @@ Sentinel CAC Manager verifies the smart card stack, installs the Department of W
 4. **Hardware Optimization** — Applies OpenSC configuration adjustments to prevent Broadcom smart card reader driver initialization delays.
 5. **Certificate Inspection** — Reads on-card digital certificates (PIV Authentication, Email Signature, Email Encryption, Device Authentication) and displays validity periods, issuing authorities, and key usage.
 
-## Supported Distributions
-
-| Distribution | Family | Package Manager | Status |
-|---|---|---|---|
-| Fedora 39, 40, 41, 44 | Fedora/RHEL | `dnf` | Verified |
-| Red Hat Enterprise Linux / Rocky / AlmaLinux | Fedora/RHEL | `dnf` | Supported |
-| Ubuntu 20.04, 22.04, 24.04 LTS | Debian | `apt` | Supported |
-| Linux Mint 20, 21, 22 | Debian | `apt` | Supported |
-| Pop!_OS 22.04+ | Debian | `apt` | Supported |
-| Zorin OS 16, 17 | Debian | `apt` | Supported |
-| Debian 11, 12 | Debian | `apt` | Supported |
-
 ## Setup
 
 Download **InstallSentinel.desktop** from the release page and launch it to start the graphical setup wizard. 
 
 The setup wizard inspects the host distribution, installs required system components and certificates, configures browser profiles, and adds Sentinel CAC Manager to the application menu.
+
+---
+
+<p align="center">
+  &copy; CodeFXR. All rights reserved.
+</p>
