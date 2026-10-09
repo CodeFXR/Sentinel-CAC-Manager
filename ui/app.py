@@ -21,7 +21,9 @@ from ui.system_view import SystemView
 from ui.diagnostics_view import DiagnosticsView
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel_icon_v2.png")
+ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel_cac_manager.png")
+if not os.path.isfile(ICON_PATH):
+    ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel_icon_v2.png")
 CSS_PATH = os.path.join(SCRIPT_DIR, "ui", "style.css")
 
 

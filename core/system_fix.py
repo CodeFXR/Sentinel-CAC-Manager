@@ -231,10 +231,34 @@ StartupWMClass=mil.dow.sentinel_cac_manager
 """
         with open(desktop_file, "w") as f:
             f.write(desktop_content)
-        os.chmod(desktop_file, 0o755)
+        # Remove legacy desktop file if present
+        legacy_desktop = os.path.join(app_dir, "sentinel_v2.desktop")
+        if os.path.isfile(legacy_desktop):
+            try:
+                os.remove(legacy_desktop)
+            except Exception:
+                pass
 
         if shutil.which("update-desktop-database"):
             subprocess.run(["update-desktop-database", app_dir], capture_output=True)
+
+        # 4. Optional Desktop folder shortcut
+        desktop_dir = os.path.join(home, "Desktop")
+        if os.path.isdir(desktop_dir):
+            try:
+                user_desktop_file = os.path.join(desktop_dir, "sentinel_cac_manager.desktop")
+                shutil.copy2(desktop_file, user_desktop_file)
+                os.chmod(user_desktop_file, 0o755)
+                legacy_user_desktop = os.path.join(desktop_dir, "sentinel_v2.desktop")
+                if os.path.isfile(legacy_user_desktop):
+                    os.remove(legacy_user_desktop)
+                if shutil.which("gio"):
+                    subprocess.run(
+                        ["gio", "set", user_desktop_file, "metadata::trusted", "true"],
+                        capture_output=True,
+                    )
+            except Exception:
+                pass
 
         if log_fn:
             log_fn(f"Installed desktop entry to {desktop_file}")

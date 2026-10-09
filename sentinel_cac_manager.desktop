@@ -2,9 +2,8 @@
 Name=Sentinel CAC Manager
 GenericName=DoW Smart Card Manager
 Comment=Automate DoW CAC Middleware, Certificates, and Browser Authentication
-Exec=python3 /home/jvm/projects/sentinel_cac_manager/sentinel_cac_manager.py --gui
-Path=/home/jvm/projects/sentinel_cac_manager
-Icon=/home/jvm/projects/sentinel_cac_manager/sentinel_cac_manager.png
+Exec=sentinel --gui
+Icon=sentinel_cac_manager
 Terminal=false
 Type=Application
 Categories=Utility;Security;

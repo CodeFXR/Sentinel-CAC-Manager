@@ -28,9 +28,9 @@ def log(msg):
 
 def enable_pcscd():
     log("Enabling and starting pcscd daemon...")
-    res = subprocess.run(["systemctl", "enable", "--now", "pcscd"], capture_output=True, text=True)
+    res = subprocess.run(["systemctl", "enable", "--now", "pcscd.socket", "pcscd"], capture_output=True, text=True)
     if res.returncode == 0:
-        log("pcscd service enabled and started.")
+        log("pcscd service and socket enabled and started.")
     else:
         log(f"pcscd service warning: {res.stderr.strip()}")
 

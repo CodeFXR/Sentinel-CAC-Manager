@@ -45,6 +45,7 @@ if [ "${FAMILY}" = "debian" ]; then
         echo "[+] Updating apt and installing core dependencies..."
         apt-get update -qq || true
         apt-get install -y ${REQUIRED_PKGS}
+        systemctl enable --now pcscd.socket pcscd 2>/dev/null || true
     else
         echo "[i] Note: To install system dependencies manually, run:"
         echo "    sudo apt install -y ${REQUIRED_PKGS}"
@@ -55,6 +56,7 @@ elif [ "${FAMILY}" = "fedora" ]; then
     if [ "$EUID" -eq 0 ]; then
         echo "[+] Installing core dependencies with dnf..."
         dnf install -y ${REQUIRED_PKGS}
+        systemctl enable --now pcscd.socket pcscd 2>/dev/null || true
     else
         echo "[i] Note: To install system dependencies manually, run:"
         echo "    sudo dnf install -y ${REQUIRED_PKGS}"
@@ -84,12 +86,37 @@ echo "    - ${BIN_DIR}/sentinel"
 echo "    - ${BIN_DIR}/sentinel-v2"
 
 # 6. Install desktop launcher
-sed "s|/home/jvm/projects/sentinel_cac_manager|${SCRIPT_DIR}|g" "${DESKTOP_SRC}" > "${APP_DIR}/sentinel_cac_manager.desktop"
+cat <<EOF > "${APP_DIR}/sentinel_cac_manager.desktop"
+[Desktop Entry]
+Name=Sentinel CAC Manager
+GenericName=DoW Smart Card Manager
+Comment=Automate DoW CAC Middleware, Certificates, and Browser Authentication
+Exec=python3 ${SCRIPT_DIR}/sentinel_cac_manager.py --gui
+Path=${SCRIPT_DIR}
+Icon=${ICON_DIR}/sentinel_cac_manager.png
+Terminal=false
+Type=Application
+Categories=Utility;Security;
+Keywords=CAC;PIV;DoW;SmartCard;Military;Security;Authentication;
+StartupNotify=true
+StartupWMClass=mil.dow.sentinel_cac_manager
+EOF
 chmod +x "${APP_DIR}/sentinel_cac_manager.desktop"
+rm -f "${APP_DIR}/sentinel_v2.desktop"
 update-desktop-database "${APP_DIR}" 2>/dev/null || true
 echo "[+] Installed desktop entry to ${APP_DIR}/sentinel_cac_manager.desktop"
 
-# 7. Check PATH
+# 7. Optional Desktop folder shortcut
+DESKTOP_DIR="${HOME}/Desktop"
+if [ -d "${DESKTOP_DIR}" ]; then
+    cp -f "${APP_DIR}/sentinel_cac_manager.desktop" "${DESKTOP_DIR}/sentinel_cac_manager.desktop"
+    chmod +x "${DESKTOP_DIR}/sentinel_cac_manager.desktop"
+    rm -f "${DESKTOP_DIR}/sentinel_v2.desktop"
+    gio set "${DESKTOP_DIR}/sentinel_cac_manager.desktop" metadata::trusted true 2>/dev/null || true
+    echo "[+] Placed desktop shortcut at ${DESKTOP_DIR}/sentinel_cac_manager.desktop"
+fi
+
+# 8. Check PATH
 if [[ ":$PATH:" != *":${BIN_DIR}:"* ]]; then
     echo ""
     echo "[!] Notice: ${BIN_DIR} is not currently in your PATH."

@@ -13,7 +13,9 @@ from core.smartcard import SmartCardStatus
 from core.system_fix import run_full_setup
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel_icon_v2.png")
+ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel_cac_manager.png")
+if not os.path.isfile(ICON_PATH):
+    ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel_icon_v2.png")
 
 
 class DashboardView(Gtk.Box):
