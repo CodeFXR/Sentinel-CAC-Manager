@@ -10,7 +10,9 @@
   <p>
     <img src="https://img.shields.io/badge/Platform-Linux-blue.svg?style=flat-square" alt="Platform" />
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg?style=flat-square&logo=python" alt="Python" />
+    <img src="https://img.shields.io/badge/Rust-PyO3-DEA584?style=flat-square&logo=rust&logoColor=white" alt="Rust" />
     <img src="https://img.shields.io/badge/UI-GTK4%20%2F%20Libadwaita-00ADD8.svg?style=flat-square" alt="UI" />
+    <img src="https://img.shields.io/badge/CSS-GTK%20CSS-1572B6?style=flat-square&logo=css3&logoColor=white" alt="CSS" />
     <img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License" />
   </p>
 
