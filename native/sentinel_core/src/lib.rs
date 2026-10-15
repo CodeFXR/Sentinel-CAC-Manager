@@ -10,7 +10,7 @@ use security::PinBuffer;
 
 #[pyfunction]
 fn version() -> &'static str {
-    "1.2.0"
+    "1.2.1"
 }
 
 #[pyfunction]

@@ -24,7 +24,7 @@ class TestRustBridge(unittest.TestCase):
     def test_rust_availability(self):
         # On this build system, Rust is compiled and should be operational
         self.assertTrue(is_rust_available())
-        self.assertEqual(get_rust_version(), "1.2.0")
+        self.assertEqual(get_rust_version(), "1.2.1")
 
     def test_cac_atr_detection(self):
         # Known Oberthur ID-One PIV CAC ATR

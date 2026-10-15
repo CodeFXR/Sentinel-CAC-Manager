@@ -1,6 +1,6 @@
 [package]
 name = "sentinel_core"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 description = "High-performance cryptographic and hardware accelerator for Sentinel CAC Manager"
 license = "MIT"
