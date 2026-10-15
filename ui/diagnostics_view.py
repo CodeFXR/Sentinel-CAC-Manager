@@ -1,13 +1,12 @@
 """Diagnostics, Web Portal Testing, and Activity Log View for Sentinel v2."""
 
 import subprocess
-import threading
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gtk, Adw, Gdk, GLib
+from gi.repository import Gtk, Adw, Gdk
 
 
 PORTALS = [

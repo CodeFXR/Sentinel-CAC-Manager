@@ -7,7 +7,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from core.platform_detector import PlatformInfo, detect_platform
 

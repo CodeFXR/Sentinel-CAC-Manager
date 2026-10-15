@@ -9,7 +9,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
 
 from core.platform_detector import detect_platform, PlatformInfo
-from core.smartcard import SmartCardStatus, is_pcscd_active
+from core.smartcard import SmartCardStatus
 from core.certificates import is_system_trust_installed
 from core.browsers import (
     check_browsers_status,

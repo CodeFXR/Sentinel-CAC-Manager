@@ -6,13 +6,11 @@ import logging
 import os
 import shutil
 import subprocess
-import threading
 from typing import Callable, Optional, Dict, Any, List, Tuple
 
 from core.platform_detector import PlatformInfo, detect_platform, find_opensc_module
 from core.browsers import configure_all_browsers, check_browsers_status
-from core.certificates import is_system_trust_installed
-from core.smartcard import is_pcscd_active, scan_smartcard
+from core.smartcard import scan_smartcard
 
 logger = logging.getLogger("sentinel.system_fix")
 

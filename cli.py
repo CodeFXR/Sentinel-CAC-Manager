@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import sys
 import os
 import re
-
 from typing import Optional
+
+from core import __version__
 
 
 def _clean_term(text: Optional[str], default: str = "Unknown") -> str:
@@ -17,15 +17,17 @@ def _clean_term(text: Optional[str], default: str = "Unknown") -> str:
     return re.sub(r"[\x00-\x1f\x7f-\x9f]", "?", str(text))
 
 
-def print_banner():
-    banner = r"""
+ASCII_BANNER = r"""
      ____         __  _          __
     / __/__ ___  / /_(_)__  ___ / /
    _\ \/ -_) _ \/ __/ / _ \/ -_) / 
   /___/\__/_//_/\__/_/_//_/\__/_/  
-       DoW CAC Identity and Middleware Automator
 """
-    print(banner)
+
+
+def print_banner():
+    print(ASCII_BANNER.rstrip("\n"))
+    print(f"       DoW CAC Identity and Middleware Automator (v{__version__})\n")
 
 
 def cmd_status():
@@ -60,7 +62,7 @@ def cmd_status():
         print(f"  Snap Firefox:          {'[CONNECTED]' if b_stat.snap_connected else '[DISCONNECTED]'}")
 
     print("-" * 65)
-    print(f" SMART CARD HARDWARE")
+    print(" SMART CARD HARDWARE")
     print("-" * 65)
     print(f"  Reader:                {_clean_term(card_stat.reader_name, 'No smart card reader found')}")
     print(f"  Card Inserted:         {'YES' if card_stat.card_present else 'NO'}")
@@ -118,6 +120,7 @@ def cmd_setup():
 
 def main():
     parser = argparse.ArgumentParser(description="Sentinel CAC Manager - Automated DoW CAC Manager for Linux")
+    parser.add_argument("--version", "-v", action="version", version=f"Sentinel CAC Manager v{__version__}")
     parser.add_argument("--status", "--check", action="store_true", help="display system and card status")
     parser.add_argument("--setup-all", "--automate", action="store_true", help="run full automated setup")
     parser.add_argument("--card-info", action="store_true", help="display details of inserted smart card")

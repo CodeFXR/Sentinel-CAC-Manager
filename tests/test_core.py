@@ -1,8 +1,12 @@
-"""Unit tests for Sentinel CAC Manager core modules and native Rust accelerator."""
-
+import sys
 import unittest
 import subprocess
 from pathlib import Path
+
+# Ensure repo root is on sys.path for direct test execution
+REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 from core.rust_bridge import (
     is_rust_available,
@@ -20,7 +24,7 @@ class TestRustBridge(unittest.TestCase):
     def test_rust_availability(self):
         # On this build system, Rust is compiled and should be operational
         self.assertTrue(is_rust_available())
-        self.assertEqual(get_rust_version(), "1.1.0")
+        self.assertEqual(get_rust_version(), "1.2.0")
 
     def test_cac_atr_detection(self):
         # Known Oberthur ID-One PIV CAC ATR

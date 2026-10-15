@@ -5,22 +5,21 @@ Provides a modern Windows-like setup wizard experience with Libadwaita / GTK4.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 import platform as sys_platform
 import threading
-from typing import Optional, List
+from typing import List
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib, Pango
+from gi.repository import Gtk, Adw, GLib
 
 from core.platform_detector import detect_platform, PlatformInfo, find_opensc_module
 from core.smartcard import scan_smartcard
-from core.browsers import configure_all_browsers, check_browsers_status
+from core.browsers import configure_all_browsers
 from core.system_fix import (
     run_privileged_helper,
     check_missing_packages,
@@ -185,7 +184,7 @@ class InstallerWindow(Adw.Window):
         cancel_btn.connect("clicked", lambda _: self.close())
         nav_box.append(cancel_btn)
 
-        next_btn = Gtk.Button(label="Next  →")
+        next_btn = Gtk.Button(label="Next")
         next_btn.add_css_class("suggested-action")
         next_btn.connect("clicked", lambda _: self.stack.set_visible_child_name("options"))
         nav_box.append(next_btn)

@@ -11,7 +11,7 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Adw, Gdk, GdkPixbuf, GLib
 
-from core.platform_detector import detect_platform, PlatformInfo
+from core.platform_detector import detect_platform
 from core.smartcard import scan_smartcard, SmartCardStatus
 from core.certificates import is_system_trust_installed
 from core.browsers import check_browsers_status

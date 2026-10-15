@@ -5,7 +5,15 @@
 # ==============================================================================
 set -euo pipefail
 
-INSTALL_DIR="${HOME}/.local/share/sentinel_cac_manager"
+TARGET_HOME="${HOME}"
+if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+    USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    if [ -n "$USER_HOME" ] && [ -d "$USER_HOME" ]; then
+        TARGET_HOME="$USER_HOME"
+    fi
+fi
+
+INSTALL_DIR="${TARGET_HOME}/.local/share/sentinel_cac_manager"
 REPO_URL="https://github.com/CodeFXR/Sentinel-CAC-Manager/archive/refs/heads/main.tar.gz"
 
 # 1. Determine if running inside a verified local checkout
@@ -30,6 +38,9 @@ if [ "$IS_LOCAL" -eq 0 ]; then
         echo "[-] Error: curl or wget is required to download Sentinel CAC Manager." >&2
         exit 1
     fi
+    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+        chown -R "${SUDO_USER}:" "${INSTALL_DIR}" 2>/dev/null || true
+    fi
     exec bash "${INSTALL_DIR}/install" "$@"
 fi
 
@@ -46,14 +57,16 @@ echo "================================================================="
 # 4. Detect distribution family
 FAMILY="debian"
 if [ -f /etc/os-release ]; then
+    # shellcheck source=/dev/null
     . /etc/os-release
     ID_LOWER=$(echo "${ID:-}" | tr '[:upper:]' '[:lower:]')
     LIKE_LOWER=$(echo "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')
-    if [[ "$ID_LOWER" =~ fedora|rhel|centos|rocky|almalinux ]]; then
+    ALL_DISTRO_IDS="${ID_LOWER} ${LIKE_LOWER}"
+    if [[ "$ALL_DISTRO_IDS" =~ fedora|rhel|centos|rocky|almalinux ]]; then
         FAMILY="fedora"
-    elif [[ "$ID_LOWER" =~ arch|manjaro ]]; then
+    elif [[ "$ALL_DISTRO_IDS" =~ arch|manjaro ]]; then
         FAMILY="arch"
-    elif [[ "$ID_LOWER" =~ suse ]]; then
+    elif [[ "$ALL_DISTRO_IDS" =~ suse ]]; then
         FAMILY="suse"
     fi
     echo "[+] Detected OS: ${PRETTY_NAME:-$ID} (Family: ${FAMILY})"
@@ -62,26 +75,26 @@ fi
 # 5. Check and offer package installation
 if [ "${FAMILY}" = "debian" ]; then
     echo "[+] Debian/Ubuntu derivative detected."
-    REQUIRED_PKGS="pcscd libpcsclite1 pcsc-tools opensc libccid libnss3-tools openssl p11-kit p11-kit-modules python3-gi gir1.2-gtk-4.0 gir1.2-adw-1"
+    REQUIRED_PKGS=(pcscd libpcsclite1 pcsc-tools opensc libccid libnss3-tools openssl p11-kit p11-kit-modules python3-gi gir1.2-gtk-4.0 gir1.2-adw-1)
     if [ "$EUID" -eq 0 ]; then
         echo "[+] Updating apt and installing core dependencies..."
         apt-get update -qq || true
-        apt-get install -y ${REQUIRED_PKGS}
+        apt-get install -y "${REQUIRED_PKGS[@]}"
         systemctl enable --now pcscd.socket pcscd 2>/dev/null || true
     else
         echo "[i] Note: To install system dependencies manually, run:"
-        echo "    sudo apt install -y ${REQUIRED_PKGS}"
+        echo "    sudo apt install -y ${REQUIRED_PKGS[*]}"
     fi
 elif [ "${FAMILY}" = "fedora" ]; then
     echo "[+] Fedora/RHEL derivative detected."
-    REQUIRED_PKGS="pcsc-lite pcsc-tools opensc openssl nss-tools p11-kit ccid python3-gobject gtk4 libadwaita"
+    REQUIRED_PKGS=(pcsc-lite pcsc-tools opensc openssl nss-tools p11-kit ccid python3-gobject gtk4 libadwaita)
     if [ "$EUID" -eq 0 ]; then
         echo "[+] Installing core dependencies with dnf..."
-        dnf install -y ${REQUIRED_PKGS}
+        dnf install -y "${REQUIRED_PKGS[@]}"
         systemctl enable --now pcscd.socket pcscd 2>/dev/null || true
     else
         echo "[i] Note: To install system dependencies manually, run:"
-        echo "    sudo dnf install -y ${REQUIRED_PKGS}"
+        echo "    sudo dnf install -y ${REQUIRED_PKGS[*]}"
     fi
 fi
 
@@ -103,9 +116,9 @@ if command -v cargo >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/Cargo.toml" ]; then
 fi
 
 # 7. Create local bin and application directories
-BIN_DIR="${HOME}/.local/bin"
-APP_DIR="${HOME}/.local/share/applications"
-ICON_DIR="${HOME}/.local/share/icons/hicolor/256x256/apps"
+BIN_DIR="${TARGET_HOME}/.local/bin"
+APP_DIR="${TARGET_HOME}/.local/share/applications"
+ICON_DIR="${TARGET_HOME}/.local/share/icons/hicolor/256x256/apps"
 ICON_SRC="${SCRIPT_DIR}/sentinel_cac_manager.png"
 
 mkdir -p "${BIN_DIR}" "${APP_DIR}" "${ICON_DIR}"
@@ -159,13 +172,24 @@ update-desktop-database "${APP_DIR}" 2>/dev/null || true
 echo "[+] Installed desktop entry to ${APP_DIR}/sentinel_cac_manager.desktop"
 
 # 11. Optional Desktop folder shortcut
-DESKTOP_DIR="${HOME}/Desktop"
+DESKTOP_DIR="${TARGET_HOME}/Desktop"
 if [ -d "${DESKTOP_DIR}" ]; then
     cp -f "${APP_DIR}/sentinel_cac_manager.desktop" "${DESKTOP_DIR}/sentinel_cac_manager.desktop"
     chmod +x "${DESKTOP_DIR}/sentinel_cac_manager.desktop"
     rm -f "${DESKTOP_DIR}/sentinel_v2.desktop"
     gio set "${DESKTOP_DIR}/sentinel_cac_manager.desktop" metadata::trusted true 2>/dev/null || true
     echo "[+] Placed desktop shortcut at ${DESKTOP_DIR}/sentinel_cac_manager.desktop"
+fi
+
+# Ensure user ownership if run under sudo
+if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+    chown "${SUDO_USER}:" "${BIN_DIR}/sentinel-cac-manager" "${BIN_DIR}/sentinel" "${BIN_DIR}/sentinel-v2" "${APP_DIR}/sentinel_cac_manager.desktop" 2>/dev/null || true
+    if [ -f "${ICON_DIR}/sentinel_cac_manager.png" ]; then
+        chown "${SUDO_USER}:" "${ICON_DIR}/sentinel_cac_manager.png" 2>/dev/null || true
+    fi
+    if [ -f "${DESKTOP_DIR}/sentinel_cac_manager.desktop" ]; then
+        chown "${SUDO_USER}:" "${DESKTOP_DIR}/sentinel_cac_manager.desktop" 2>/dev/null || true
+    fi
 fi
 
 # 12. Check PATH

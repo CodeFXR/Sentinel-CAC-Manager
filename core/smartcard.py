@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Tuple
 
 from core.rust_bridge import (
     parse_card_certificate_rust,

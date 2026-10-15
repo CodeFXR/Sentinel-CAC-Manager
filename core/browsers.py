@@ -8,11 +8,9 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 from core.platform_detector import (
-    PlatformInfo,
-    detect_platform,
     get_firefox_profile_dirs,
     get_nssdb_dir,
     is_snap_firefox_installed,

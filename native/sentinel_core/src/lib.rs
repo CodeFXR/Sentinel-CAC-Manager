@@ -10,7 +10,7 @@ use security::PinBuffer;
 
 #[pyfunction]
 fn version() -> &'static str {
-    "1.1.0"
+    "1.2.0"
 }
 
 #[pyfunction]
@@ -21,7 +21,7 @@ fn parse_certificate(
     data: &[u8],
 ) -> PyResult<PyCardCertificate> {
     parse_der_or_pem_bytes(id, label, usage, data)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
+        .map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
 #[pyfunction]
