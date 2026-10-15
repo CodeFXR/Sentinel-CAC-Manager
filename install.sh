@@ -63,6 +63,12 @@ elif [ "${FAMILY}" = "fedora" ]; then
     fi
 fi
 
+# 2.5 Optional: Build native Rust accelerator if Cargo is present
+if command -v cargo >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/Cargo.toml" ]; then
+    echo "[+] Rust toolchain detected. Compiling native accelerator module..."
+    (cd "${SCRIPT_DIR}" && cargo build --release -q) || echo "[!] Rust build skipped; falling back to pure-Python runtime."
+fi
+
 # 3. Create local bin and application directories
 mkdir -p "${BIN_DIR}" "${APP_DIR}" "${ICON_DIR}"
 

@@ -7,11 +7,14 @@ import sys
 import os
 import re
 
+from typing import Optional
+
 from core.platform_detector import detect_platform, get_firefox_profile_dirs
 from core.smartcard import scan_smartcard, is_pcscd_active
 from core.certificates import is_system_trust_installed, get_available_certificates
 from core.browsers import check_browsers_status, configure_all_browsers
 from core.system_fix import run_full_setup, run_privileged_helper, check_missing_packages
+from core.rust_bridge import is_rust_available, get_rust_version
 
 
 def _clean_term(text: Optional[str], default: str = "Unknown") -> str:
@@ -44,6 +47,8 @@ def cmd_status():
     print("-" * 65)
     print(f"  Package Manager:       {plat.package_manager}")
     print(f"  Missing Dependencies:  {', '.join(missing) if missing else 'None (All Installed)'}")
+    rust_stat = f"[RUST v{get_rust_version()}]" if is_rust_available() else "[PYTHON FALLBACK]"
+    print(f"  Native Core Engine:    {rust_stat}")
     print(f"  PCSC Daemon (pcscd):   {'[ACTIVE]' if card_stat.service_active else '[INACTIVE]'}")
     print(f"  DoW System Trust:      {'[INSTALLED]' if certs_installed else '[NOT INSTALLED]'}")
     print(f"  Firefox Profiles:      {b_stat.firefox_profiles_count} detected")

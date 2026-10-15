@@ -132,4 +132,17 @@ else
     echo "  opensc-tool not available for live query."
 fi
 
+echo -e "\n${BOLD}${YELLOW}[9. Native Rust Accelerator Status]${RESET}"
+if command -v cargo >/dev/null 2>&1; then
+    echo -e "  Cargo:           ${GREEN}Installed${RESET} ($(cargo --version))"
+else
+    echo -e "  Cargo:           ${YELLOW}Not Installed (Pure-Python fallback will be used)${RESET}"
+fi
+if python3 -c "import sys; from core.rust_bridge import is_rust_available; sys.exit(0 if is_rust_available() else 1)" 2>/dev/null; then
+    RUST_V=$(python3 -c "from core.rust_bridge import get_rust_version; print(get_rust_version())" 2>/dev/null || echo "Unknown")
+    echo -e "  sentinel_core:   ${GREEN}Active & Operational${RESET} (v${RUST_V})"
+else
+    echo -e "  sentinel_core:   ${YELLOW}Not Compiled / Pure-Python Fallback Active${RESET}"
+fi
+
 echo -e "\n${BOLD}${CYAN}=== End of Telemetry Report ===${RESET}\n"

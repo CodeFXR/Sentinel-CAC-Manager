@@ -8,7 +8,13 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
+
+from core.rust_bridge import (
+    parse_card_certificate_rust,
+    parse_pkcs15_list_rust,
+    is_cac_atr_rust,
+)
 
 logger = logging.getLogger("sentinel.smartcard")
 
@@ -191,19 +197,10 @@ def read_card_certificates() -> List[CardCertificate]:
     candidate_ids: List[Tuple[str, str, str]] = []
     try:
         res_list = subprocess.run([pkcs15_tool, "-c"], capture_output=True, text=True, timeout=5)
-        current_id = None
-        current_label = None
-        for line in res_list.stdout.splitlines():
-            line_s = line.strip()
-            if line_s.startswith("ID :") or line_s.startswith("ID:"):
-                current_id = line_s.split(":", 1)[1].strip()
-            elif line_s.startswith("Label :") or line_s.startswith("Label:"):
-                current_label = line_s.split(":", 1)[1].strip()
-                if current_id:
-                    spec = known_specs.get(current_id, (current_label or f"Certificate {current_id}", "Smart Card Credential"))
-                    candidate_ids.append((current_id, spec[0], spec[1]))
-                    current_id = None
-                    current_label = None
+        parsed_pairs = parse_pkcs15_list_rust(res_list.stdout)
+        for cid, clabel in parsed_pairs:
+            spec = known_specs.get(cid, (clabel or f"Certificate {cid}", "Smart Card Credential"))
+            candidate_ids.append((cid, spec[0], spec[1]))
     except Exception as e:
         logger.debug(f"Dynamic cert list query failed: {e}")
 
@@ -234,7 +231,14 @@ def read_card_certificates() -> List[CardCertificate]:
             if not raw_der or (b"BEGIN CERTIFICATE" not in raw_der and len(raw_der) < 64):
                 continue
 
-            # OpenSSL DER parse
+            # 1. Fast path: ASN.1 DER/PEM parsing via Rust native accelerator
+            parsed = parse_card_certificate_rust(cid, label, usage, raw_der)
+            if parsed:
+                certs.append(parsed)
+                seen_ids.add(cid)
+                continue
+
+            # 2. Fallback path: OpenSSL CLI subprocess
             res_x509 = subprocess.run(
                 ["openssl", "x509", "-inform", "DER", "-noout", "-subject", "-issuer", "-dates", "-serial"],
                 input=raw_der,
@@ -300,6 +304,8 @@ def scan_smartcard() -> SmartCardStatus:
                 name_out = res_name.stdout.strip()
                 if name_out:
                     card_name = name_out.splitlines()[0].strip()
+                elif atr and is_cac_atr_rust(atr):
+                    card_name = "DoD Common Access Card (CAC / PIV)"
         except Exception as e:
             logger.debug(f"opensc-tool scan failed: {e}")
 

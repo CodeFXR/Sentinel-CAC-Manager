@@ -1,0 +1,16 @@
+[package]
+name = "sentinel_core"
+version = "1.1.0"
+edition = "2021"
+description = "High-performance cryptographic and hardware accelerator for Sentinel CAC Manager"
+license = "MIT"
+
+[lib]
+name = "sentinel_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.30", features = ["extension-module"] }
+x509-parser = "0.16"
+regex = "1.10"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
