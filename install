@@ -139,7 +139,12 @@ echo "    - ${BIN_DIR}/sentinel-cac-manager"
 echo "    - ${BIN_DIR}/sentinel"
 echo "    - ${BIN_DIR}/sentinel-v2"
 
-# 10. Install desktop launcher (FreeDesktop argument escaping applied)
+# 10. Install desktop launcher (FreeDesktop argument escaping and newline rejection applied - CWE-74, CWE-88)
+if [[ "${SCRIPT_DIR}" =~ [$'\r\n'] ]] || [[ "${ICON_DIR}" =~ [$'\r\n'] ]] || [[ "${BIN_DIR}" =~ [$'\r\n'] ]]; then
+    echo "[-] Error: installation directory path contains carriage return or newline characters." >&2
+    exit 1
+fi
+
 escape_desktop_exec_arg() {
     local str="$1"
     str="${str//\\/\\\\}"
@@ -149,7 +154,15 @@ escape_desktop_exec_arg() {
     printf '"%s"' "$str"
 }
 
+escape_desktop_val() {
+    local str="$1"
+    str="${str//\\/\\\\}"
+    printf '%s' "$str"
+}
+
 ESCAPED_SCRIPT=$(escape_desktop_exec_arg "${SCRIPT_DIR}/sentinel_cac_manager.py")
+ESCAPED_PATH=$(escape_desktop_val "${SCRIPT_DIR}")
+ESCAPED_ICON=$(escape_desktop_val "${ICON_DIR}/sentinel_cac_manager.png")
 
 cat <<EOF > "${APP_DIR}/sentinel_cac_manager.desktop"
 [Desktop Entry]
@@ -157,8 +170,8 @@ Name=Sentinel CAC Manager
 GenericName=DoW Smart Card Manager
 Comment=Automate DoW CAC Middleware, Certificates, and Browser Authentication
 Exec=python3 ${ESCAPED_SCRIPT} --gui
-Path=${SCRIPT_DIR}
-Icon=${ICON_DIR}/sentinel_cac_manager.png
+Path=${ESCAPED_PATH}
+Icon=${ESCAPED_ICON}
 Terminal=false
 Type=Application
 Categories=Utility;Security;

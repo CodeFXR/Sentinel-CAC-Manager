@@ -237,12 +237,23 @@ exec python3 {quoted_script} "$@"
         if not os.path.isfile(icon_path):
             icon_path = os.path.join(project_dir, "sentinel_icon.png")
 
+        # Validate that path values contain no newline characters to prevent desktop entry injection (CWE-74)
+        for p_name, p_val in (("script_target", script_target), ("project_dir", project_dir), ("icon_path", icon_path)):
+            if any(c in p_val for c in ("\r", "\n")):
+                raise ValueError(f"Invalid {p_name}: path must not contain newline characters (CWE-74)")
+
+        def escape_desktop_value(val: str) -> str:
+            """Escape backslashes for standard desktop entry line-oriented string fields (CWE-74)."""
+            return val.replace("\\", "\\\\")
+
         def escape_desktop_exec_arg(val: str) -> str:
             """Escape an argument according to FreeDesktop Desktop Entry Exec key rules (CWE-88)."""
             escaped = val.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$")
             return f'"{escaped}"'
 
         escaped_script = escape_desktop_exec_arg(script_target)
+        escaped_project_dir = escape_desktop_value(project_dir)
+        escaped_icon_path = escape_desktop_value(icon_path)
 
         # FreeDesktop spec requires argument quoting if path contains whitespace
         desktop_content = f"""[Desktop Entry]
@@ -250,8 +261,8 @@ Name=Sentinel CAC Manager
 GenericName=DoW Smart Card Manager
 Comment=Automate DoW CAC Middleware, Certificates, and Browser Authentication
 Exec=python3 {escaped_script} --gui
-Path={project_dir}
-Icon={icon_path}
+Path={escaped_project_dir}
+Icon={escaped_icon_path}
 Terminal=false
 Type=Application
 Categories=Utility;Security;

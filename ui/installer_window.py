@@ -161,8 +161,10 @@ class InstallerWindow(Adw.Window):
         r_name = card_stat.reader_name or "No physical reader detected (can be connected later)"
         reader_row = Adw.ActionRow(
             title="Smart Card Hardware",
-            subtitle=r_name,
+            subtitle=GLib.markup_escape_text(r_name),
         )
+        if hasattr(reader_row, "set_use_markup"):
+            reader_row.set_use_markup(False)
         if card_stat.reader_name:
             r_badge = Gtk.Label(label="Reader Found")
             r_badge.add_css_class("badge-success")

@@ -16,6 +16,7 @@ date -u +"Timestamp (UTC): %Y-%m-%d %H:%M:%S"
 
 echo -e "\n${BOLD}${YELLOW}[1. Operating System & Kernel]${RESET}"
 if [ -f /etc/os-release ]; then
+    # shellcheck source=/dev/null
     . /etc/os-release
     echo "  OS Name:         ${PRETTY_NAME:-Unknown}"
     echo "  OS ID:           ${ID:-Unknown}"
@@ -138,8 +139,11 @@ if command -v cargo >/dev/null 2>&1; then
 else
     echo -e "  Cargo:           ${YELLOW}Not Installed (Pure-Python fallback will be used)${RESET}"
 fi
-if python3 -c "import sys; from core.rust_bridge import is_rust_available; sys.exit(0 if is_rust_available() else 1)" 2>/dev/null; then
-    RUST_V=$(python3 -c "from core.rust_bridge import get_rust_version; print(get_rust_version())" 2>/dev/null || echo "Unknown")
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+if python3 -I -c "import sys; sys.path = [p for p in sys.path if p not in ('', '.')]; sys.path.insert(0, '${REPO_ROOT}'); from core.rust_bridge import is_rust_available; sys.exit(0 if is_rust_available() else 1)" 2>/dev/null; then
+    RUST_V=$(python3 -I -c "import sys; sys.path = [p for p in sys.path if p not in ('', '.')]; sys.path.insert(0, '${REPO_ROOT}'); from core.rust_bridge import get_rust_version; print(get_rust_version())" 2>/dev/null || echo "Unknown")
     echo -e "  sentinel_core:   ${GREEN}Active & Operational${RESET} (v${RUST_V})"
 else
     echo -e "  sentinel_core:   ${YELLOW}Not Compiled / Pure-Python Fallback Active${RESET}"

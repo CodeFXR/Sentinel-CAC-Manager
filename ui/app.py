@@ -157,7 +157,11 @@ class MainWindow(Adw.ApplicationWindow):
         self.view_stack.set_hexpand(True)
 
     def show_toast(self, message: str):
-        toast = Adw.Toast.new(message)
+        # Escape markup and disable markup interpretation to prevent deceptive link/text injection (CWE-116)
+        escaped_message = GLib.markup_escape_text(message)
+        toast = Adw.Toast.new(escaped_message)
+        if hasattr(toast, "set_use_markup"):
+            toast.set_use_markup(False)
         toast.set_timeout(4)
         self.toast_overlay.add_toast(toast)
 
@@ -186,8 +190,9 @@ class MainWindow(Adw.ApplicationWindow):
 
         # Card event toasts
         if c_stat.card_present and not prev_present:
-            holder = c_stat.primary_certificate.holder_name if c_stat.primary_certificate else "CAC"
-            self.show_toast(f"Card Inserted: {holder}")
+            holder = (c_stat.primary_certificate.holder_name if c_stat.primary_certificate else None) or "CAC"
+            clean_holder = GLib.markup_escape_text(holder)
+            self.show_toast(f"Card Inserted: {clean_holder}")
             self.append_log(f"[HARDWARE] Card inserted: {c_stat.token_label or 'CAC'}")
         elif not c_stat.card_present and prev_present:
             self.show_toast("Smart Card Removed")

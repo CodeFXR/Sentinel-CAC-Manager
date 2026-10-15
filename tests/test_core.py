@@ -85,6 +85,12 @@ class TestCliSanitization(unittest.TestCase):
         self.assertNotIn("\x07", cleaned)
         self.assertEqual(_clean_term(None, "Fallback"), "Fallback")
 
+    def test_desktop_entry_newline_injection_rejection(self):
+        from core.system_fix import install_desktop_integration
+        success, msg = install_desktop_integration(project_dir="/tmp/malicious\nExec=evil")
+        self.assertFalse(success)
+        self.assertIn("must not contain newline characters", msg)
+
 
 class TestPlatformDetector(unittest.TestCase):
     def test_platform_detection(self):

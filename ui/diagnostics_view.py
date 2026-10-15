@@ -56,6 +56,8 @@ class DiagnosticsView(Gtk.Box):
 
         for name, url in PORTALS:
             row = Adw.ActionRow(title=name, subtitle=url)
+            if hasattr(row, "set_use_markup"):
+                row.set_use_markup(False)
             btn = Gtk.Button(label="Open")
             btn.add_css_class("flat")
             btn.connect("clicked", lambda b, u=url: self.open_url(u))
