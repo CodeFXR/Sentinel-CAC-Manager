@@ -5,6 +5,8 @@
 # ==============================================================================
 set -euo pipefail
 
+ORIGINAL_ARGS=("$@")
+
 TARGET_HOME="${HOME}"
 if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
     USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
@@ -41,20 +43,10 @@ if [ "$IS_LOCAL" -eq 0 ]; then
     if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
         chown -R "${SUDO_USER}:" "${INSTALL_DIR}" 2>/dev/null || true
     fi
-    exec bash "${INSTALL_DIR}/install" "$@"
+    exec bash "${INSTALL_DIR}/install" "${ORIGINAL_ARGS[@]}"
 fi
 
-# 3. Local execution: Check for GUI wizard flag
-if [ "${1:-}" = "--gui" ]; then
-    echo "[+] Launching graphical setup wizard..."
-    exec python3 "${SCRIPT_DIR}/installer.py"
-fi
-
-echo "================================================================="
-echo "   Sentinel CAC Manager - Automated DoW CAC Installer"
-echo "================================================================="
-
-# 4. Detect distribution family
+# 3. Detect distribution family
 FAMILY="debian"
 if [ -f /etc/os-release ]; then
     # shellcheck source=/dev/null
@@ -69,53 +61,231 @@ if [ -f /etc/os-release ]; then
     elif [[ "$ALL_DISTRO_IDS" =~ suse ]]; then
         FAMILY="suse"
     fi
-    echo "[+] Detected OS: ${PRETTY_NAME:-$ID} (Family: ${FAMILY})"
 fi
 
-# 5. Check and offer package installation
-if [ "${FAMILY}" = "debian" ]; then
-    echo "[+] Debian/Ubuntu derivative detected."
-    REQUIRED_PKGS=(pcscd libpcsclite1 pcsc-tools opensc libccid libnss3-tools openssl p11-kit p11-kit-modules python3-gi gir1.2-gtk-4.0 gir1.2-adw-1)
-    if [ "$EUID" -eq 0 ]; then
-        echo "[+] Updating apt and installing core dependencies..."
-        apt-get update -qq || true
-        apt-get install -y "${REQUIRED_PKGS[@]}"
-        systemctl enable --now pcscd.socket pcscd 2>/dev/null || true
-    else
-        echo "[i] Note: To install system dependencies manually, run:"
-        echo "    sudo apt install -y ${REQUIRED_PKGS[*]}"
-    fi
-elif [ "${FAMILY}" = "fedora" ]; then
-    echo "[+] Fedora/RHEL derivative detected."
-    REQUIRED_PKGS=(pcsc-lite pcsc-tools opensc openssl nss-tools p11-kit ccid python3-gobject gtk4 libadwaita)
-    if [ "$EUID" -eq 0 ]; then
-        echo "[+] Installing core dependencies with dnf..."
-        dnf install -y "${REQUIRED_PKGS[@]}"
-        systemctl enable --now pcscd.socket pcscd 2>/dev/null || true
-    else
-        echo "[i] Note: To install system dependencies manually, run:"
-        echo "    sudo dnf install -y ${REQUIRED_PKGS[*]}"
-    fi
-fi
+# Define required system packages for each distribution family
+case "${FAMILY}" in
+    debian)
+        REQUIRED_PKGS=(pcscd libpcsclite1 pcsc-tools opensc libccid libnss3-tools openssl p11-kit p11-kit-modules python3-gi gir1.2-gtk-4.0 gir1.2-adw-1)
+        ;;
+    fedora)
+        REQUIRED_PKGS=(pcsc-lite pcsc-tools opensc openssl nss-tools p11-kit ccid python3-gobject gtk4 libadwaita)
+        ;;
+    arch)
+        REQUIRED_PKGS=(pcsclite pcsc-tools opensc openssl nss p11-kit ccid python-gobject gtk4 libadwaita)
+        ;;
+    suse)
+        REQUIRED_PKGS=(pcsc-lite pcsc-tools opensc openssl mozilla-nss-tools p11-kit pcsc-ccid python3-gobject gtk4 typelib-1_0-Adw-1)
+        ;;
+    *)
+        REQUIRED_PKGS=(pcscd opensc openssl libnss3-tools python3-gi)
+        ;;
+esac
 
-# 5.5 If running as root, protect the privileged helper and reset smart card ATR
-if [ "$EUID" -eq 0 ]; then
+# 4. Handle internal --install-deps elevation target
+if [ "${1:-}" = "--install-deps" ]; then
+    if [ "$EUID" -ne 0 ]; then
+        echo "[-] Error: --install-deps requires root privileges." >&2
+        exit 1
+    fi
+    echo "[+] Updating package index and installing dependencies for ${FAMILY}..."
+    case "${FAMILY}" in
+        debian)
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq || true
+            apt-get install -y --no-install-recommends "${REQUIRED_PKGS[@]}"
+            ;;
+        fedora)
+            dnf install -y --setopt=install_weak_deps=False "${REQUIRED_PKGS[@]}"
+            ;;
+        arch)
+            pacman -Sy --noconfirm "${REQUIRED_PKGS[@]}"
+            ;;
+        suse)
+            zypper install -y "${REQUIRED_PKGS[@]}"
+            ;;
+    esac
+
+    # Enable and start smart card daemon
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable --now pcscd.socket pcscd 2>/dev/null || true
+    fi
+
+    # Deploy protected privileged helper
     echo "[+] Deploying protected privileged helper to /usr/libexec/sentinel/..."
     mkdir -p /usr/libexec/sentinel
     cp -f "${SCRIPT_DIR}/core/privileged_helper.py" /usr/libexec/sentinel/privileged_helper.py
     chmod 0755 /usr/libexec/sentinel/privileged_helper.py
+
+    # Reset smart card ATR if card present
     if command -v opensc-tool >/dev/null 2>&1; then
         opensc-tool --reset warm 2>/dev/null || true
     fi
+
+    echo "[+] Dependencies successfully installed."
+    exit 0
 fi
 
-# 6. Optional: Build native Rust accelerator if Cargo is present
+# 5. Check which packages are currently missing
+MISSING_PKGS=()
+case "${FAMILY}" in
+    debian)
+        for pkg in "${REQUIRED_PKGS[@]}"; do
+            if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+                MISSING_PKGS+=("$pkg")
+            fi
+        done
+        ;;
+    fedora|suse)
+        for pkg in "${REQUIRED_PKGS[@]}"; do
+            if ! rpm -q "$pkg" >/dev/null 2>&1; then
+                MISSING_PKGS+=("$pkg")
+            fi
+        done
+        ;;
+    arch)
+        for pkg in "${REQUIRED_PKGS[@]}"; do
+            if ! pacman -Q "$pkg" >/dev/null 2>&1; then
+                MISSING_PKGS+=("$pkg")
+            fi
+        done
+        ;;
+    *)
+        for b in pcscd opensc-tool certutil; do
+            if ! command -v "$b" >/dev/null 2>&1; then
+                MISSING_PKGS+=("$b")
+            fi
+        done
+        ;;
+esac
+
+# 6. Check if elevation is required (dependencies missing or helper missing)
+NEEDS_ROOT=0
+if [ "${#MISSING_PKGS[@]}" -gt 0 ] || [ ! -f "/usr/libexec/sentinel/privileged_helper.py" ]; then
+    NEEDS_ROOT=1
+fi
+
+if [ "$NEEDS_ROOT" -eq 1 ]; then
+    if [ "$EUID" -eq 0 ]; then
+        echo "[+] Running as root. Installing core system dependencies..."
+        case "${FAMILY}" in
+            debian)
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update -qq || true
+                apt-get install -y --no-install-recommends "${REQUIRED_PKGS[@]}"
+                ;;
+            fedora)
+                dnf install -y --setopt=install_weak_deps=False "${REQUIRED_PKGS[@]}"
+                ;;
+            arch)
+                pacman -Sy --noconfirm "${REQUIRED_PKGS[@]}"
+                ;;
+            suse)
+                zypper install -y "${REQUIRED_PKGS[@]}"
+                ;;
+        esac
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable --now pcscd.socket pcscd 2>/dev/null || true
+        fi
+        mkdir -p /usr/libexec/sentinel
+        cp -f "${SCRIPT_DIR}/core/privileged_helper.py" /usr/libexec/sentinel/privileged_helper.py
+        chmod 0755 /usr/libexec/sentinel/privileged_helper.py
+        if command -v opensc-tool >/dev/null 2>&1; then
+            opensc-tool --reset warm 2>/dev/null || true
+        fi
+    else
+        echo "================================================================="
+        echo "   Sentinel CAC Manager - System Dependency Setup"
+        echo "================================================================="
+        if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
+            echo "[!] Missing required system packages:"
+            for pkg in "${MISSING_PKGS[@]}"; do
+                echo "    - $pkg"
+            done
+            echo ""
+        fi
+        echo "[*] Administrator privileges (sudo) are required to install dependencies."
+
+        if [ -t 0 ]; then
+            sudo "${SCRIPT_DIR}/install" --install-deps
+        elif command -v pkexec >/dev/null 2>&1 && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+            pkexec "${SCRIPT_DIR}/install" --install-deps
+        else
+            LAUNCHED=0
+            for term in x-terminal-emulator gnome-terminal ptyxis konsole xfce4-terminal mate-terminal alacritty kitty foot xterm; do
+                if command -v "$term" >/dev/null 2>&1; then
+                    case "$term" in
+                        gnome-terminal|mate-terminal|xfce4-terminal|ptyxis)
+                            "$term" -- bash -c "sudo '${SCRIPT_DIR}/install' --install-deps; echo 'Press Enter to continue...'; read -r"
+                            LAUNCHED=1
+                            break
+                            ;;
+                        konsole)
+                            "$term" -e bash -c "sudo '${SCRIPT_DIR}/install' --install-deps; echo 'Press Enter to continue...'; read -r"
+                            LAUNCHED=1
+                            break
+                            ;;
+                        *)
+                            "$term" -e "bash -c 'sudo \"${SCRIPT_DIR}/install\" --install-deps; echo \"Press Enter to continue...\"; read -r'"
+                            LAUNCHED=1
+                            break
+                            ;;
+                    esac
+                fi
+            done
+            if [ "$LAUNCHED" -eq 0 ]; then
+                sudo "${SCRIPT_DIR}/install" --install-deps
+            fi
+        fi
+    fi
+fi
+
+# 7. Determine run mode (GUI vs CLI)
+WANT_GUI=0
+if [ "${1:-}" = "--gui" ]; then
+    WANT_GUI=1
+elif [ $# -eq 0 ] && [ ! -t 0 ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    # Double-clicked or run as program without arguments in graphical desktop session
+    WANT_GUI=1
+fi
+
+if [ "$WANT_GUI" -eq 1 ]; then
+    if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+        echo "[!] Notice: No graphical display detected (\$DISPLAY / \$WAYLAND_DISPLAY is unset)."
+        echo "[*] Proceeding with command-line installation..."
+        WANT_GUI=0
+    fi
+fi
+
+if [ "$WANT_GUI" -eq 1 ]; then
+    echo "[+] Launching graphical setup wizard..."
+    if [ "$EUID" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+        exec sudo -u "${SUDO_USER}" env \
+            PATH="$PATH" \
+            HOME="${TARGET_HOME}" \
+            DISPLAY="${DISPLAY:-}" \
+            XAUTHORITY="${XAUTHORITY:-}" \
+            WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
+            XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u "$SUDO_USER")}" \
+            DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" \
+            python3 "${SCRIPT_DIR}/installer.py"
+    else
+        exec python3 "${SCRIPT_DIR}/installer.py"
+    fi
+fi
+
+echo "================================================================="
+echo "   Sentinel CAC Manager - Automated DoW CAC Installer"
+echo "================================================================="
+echo "[+] Detected OS: ${PRETTY_NAME:-$ID} (Family: ${FAMILY})"
+
+# 8. Optional: Build native Rust accelerator if Cargo is present
 if command -v cargo >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/Cargo.toml" ]; then
     echo "[+] Rust toolchain detected. Compiling native accelerator module..."
     (cd "${SCRIPT_DIR}" && cargo build --release -q) || echo "[!] Rust build skipped; falling back to pure-Python runtime."
 fi
 
-# 7. Create local bin and application directories
+# 9. Create local bin and application directories
 BIN_DIR="${TARGET_HOME}/.local/bin"
 APP_DIR="${TARGET_HOME}/.local/share/applications"
 ICON_DIR="${TARGET_HOME}/.local/share/icons/hicolor/256x256/apps"
@@ -123,13 +293,13 @@ ICON_SRC="${SCRIPT_DIR}/sentinel_cac_manager.png"
 
 mkdir -p "${BIN_DIR}" "${APP_DIR}" "${ICON_DIR}"
 
-# 8. Copy high-res icon to user icon theme
+# 10. Copy high-res icon to user icon theme
 if [ -f "${ICON_SRC}" ]; then
     cp -f "${ICON_SRC}" "${ICON_DIR}/sentinel_cac_manager.png"
     echo "[+] Installed app icon to ${ICON_DIR}/sentinel_cac_manager.png"
 fi
 
-# 9. Create launcher wrappers and symlinks in ~/.local/bin (Format string bug fixed: %q instead of %%q)
+# 11. Create launcher wrappers and symlinks in ~/.local/bin
 printf '#!/usr/bin/env bash\nexec python3 %q "$@"\n' "${SCRIPT_DIR}/sentinel_cac_manager.py" > "${BIN_DIR}/sentinel-cac-manager"
 chmod +x "${BIN_DIR}/sentinel-cac-manager"
 ln -sf "${BIN_DIR}/sentinel-cac-manager" "${BIN_DIR}/sentinel"
@@ -139,7 +309,7 @@ echo "    - ${BIN_DIR}/sentinel-cac-manager"
 echo "    - ${BIN_DIR}/sentinel"
 echo "    - ${BIN_DIR}/sentinel-v2"
 
-# 10. Install desktop launcher (FreeDesktop argument escaping and newline rejection applied - CWE-74, CWE-88)
+# 12. Install desktop launcher (FreeDesktop argument escaping and newline rejection applied)
 if [[ "${SCRIPT_DIR}" =~ [$'\r\n'] ]] || [[ "${ICON_DIR}" =~ [$'\r\n'] ]] || [[ "${BIN_DIR}" =~ [$'\r\n'] ]]; then
     echo "[-] Error: installation directory path contains carriage return or newline characters." >&2
     exit 1
@@ -184,7 +354,7 @@ rm -f "${APP_DIR}/sentinel_v2.desktop"
 update-desktop-database "${APP_DIR}" 2>/dev/null || true
 echo "[+] Installed desktop entry to ${APP_DIR}/sentinel_cac_manager.desktop"
 
-# 11. Optional Desktop folder shortcut
+# 13. Optional Desktop folder shortcut
 DESKTOP_DIR="${TARGET_HOME}/Desktop"
 if [ -d "${DESKTOP_DIR}" ]; then
     cp -f "${APP_DIR}/sentinel_cac_manager.desktop" "${DESKTOP_DIR}/sentinel_cac_manager.desktop"
@@ -205,7 +375,7 @@ if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
     fi
 fi
 
-# 12. Check PATH
+# 14. Check PATH
 if [[ ":$PATH:" != *":${BIN_DIR}:"* ]]; then
     echo ""
     echo "[!] Notice: ${BIN_DIR} is not currently in your PATH."

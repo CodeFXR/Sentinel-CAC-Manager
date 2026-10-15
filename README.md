@@ -35,15 +35,31 @@ Sentinel CAC Manager verifies the smart card stack, installs the Department of W
 
 ## Setup
 
-### Option 1: Graphical Installation (Download Archive)
+The installer automatically detects your Linux distribution, checks for missing system dependencies (`pcscd`, `opensc`, `gir1.2-adw-1`, `python3-gi`, `libnss3-tools`, etc.), prompts for administrative authorization (via standard `sudo` or Polkit dialog) to install missing packages, and configures smart card services.
 
-1. Download **Sentinel-CAC-Manager.tar.gz** from the release page.
-2. Right-click the downloaded archive in your Downloads folder and select **Extract Here**.
-3. Open the extracted folder and launch the installer:
-   - **KDE Plasma / XFCE:** Double-click **Install Sentinel CAC Manager** and click **Execute**.
-   - **GNOME (Ubuntu / Fedora):** Right-click **Install Sentinel CAC Manager**, select **Allow Launching**, then double-click to start.
+### Option 1: Release Archive (Recommended for Desktop Users)
 
-### Option 2: Terminal Command
+1. Download **Sentinel-CAC-Manager.tar.gz** from the [GitHub Releases](https://github.com/CodeFXR/Sentinel-CAC-Manager/releases) page.
+2. Right-click the downloaded archive in your **Downloads** folder and select **Extract Here**.
+3. Open the extracted `Sentinel-CAC-Manager` folder and launch the installer based on your desktop environment:
+
+- **Linux Mint (Cinnamon, MATE, XFCE):**
+  - Double-click **Install Sentinel CAC Manager** (or right-click `install` and select **Run as a Program**).
+  - When prompted, enter your administrator password in the terminal window to install system dependencies.
+  - The graphical setup wizard will open automatically once package setup completes.
+
+- **GNOME (Ubuntu, Fedora Workstation):**
+  - **Terminal Method (Fastest):** Inside the extracted folder, right-click any blank space, select **Open in Terminal**, and run:
+    ```bash
+    ./install --gui
+    ```
+  - **Desktop Launcher Method:** Move the **Install Sentinel CAC Manager** file to your **Desktop**, right-click it, select **Allow Launching**, and double-click to start.
+  - **File Manager Method:** Right-click the `install` script and select **Run as a Program**.
+
+- **KDE Plasma (Kubuntu, Fedora KDE):**
+  - Double-click **Install Sentinel CAC Manager**, click **Execute**, and enter your administrator password when prompted.
+
+### Option 2: Automated Terminal One-Liner
 
 Run the automated installer one-liner:
 
@@ -57,7 +73,7 @@ To launch the graphical setup wizard directly from the terminal:
 curl -fsSL https://raw.githubusercontent.com/CodeFXR/Sentinel-CAC-Manager/main/install | bash -s -- --gui
 ```
 
-The setup wizard inspects the host distribution, installs required system components and certificates, configures browser profiles, and adds Sentinel CAC Manager to the application menu.
+The setup wizard inspects the host distribution, installs required system components and certificates, configures browser profiles, and adds Sentinel CAC Manager to your application menu.
 
 ---
 

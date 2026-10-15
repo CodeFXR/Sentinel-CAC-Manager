@@ -133,13 +133,23 @@ def main():
     args = parser.parse_args()
 
     if args.installer:
-        from ui.installer_window import run_installer_gui
-        run_installer_gui()
+        try:
+            from ui.installer_window import run_installer_gui
+            run_installer_gui()
+        except (ImportError, ValueError) as err:
+            print(f"[-] Error: Could not launch setup wizard ({err}).")
+            print("[-] Required GUI libraries (GTK4 / Libadwaita / PyGObject) are not installed.")
+            print("[-] Run './install' to install all system dependencies.")
         return
 
     if args.gui:
-        from ui.app import run_gui
-        run_gui()
+        try:
+            from ui.app import run_gui
+            run_gui()
+        except (ImportError, ValueError) as err:
+            print(f"[-] Error: Could not launch GUI ({err}).")
+            print("[-] Required GUI libraries (GTK4 / Libadwaita / PyGObject) are not installed.")
+            print("[-] Run './install' to install all system dependencies.")
         return
 
     print_banner()
