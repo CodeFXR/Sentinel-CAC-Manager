@@ -18,6 +18,19 @@ logger = logging.getLogger("sentinel.system_fix")
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HELPER_SCRIPT = os.path.join(SCRIPT_DIR, "core", "privileged_helper.py")
+SYSTEM_HELPER = "/usr/libexec/sentinel/privileged_helper.py"
+
+
+def get_helper_script() -> str:
+    """Return protected root-owned helper if installed, else fallback to repository helper."""
+    if os.path.isfile(SYSTEM_HELPER):
+        try:
+            st = os.stat(SYSTEM_HELPER)
+            if st.st_uid == 0:
+                return SYSTEM_HELPER
+        except OSError:
+            pass
+    return HELPER_SCRIPT
 
 
 def check_missing_packages(plat: Optional[PlatformInfo] = None) -> List[str]:
@@ -43,13 +56,14 @@ def run_privileged_helper(
     timeout: int = 60,
 ) -> Tuple[bool, str]:
     """Run privileged_helper.py via pkexec (or directly if root)."""
+    helper_path = get_helper_script()
     is_root = (os.geteuid() == 0)
     if is_root:
-        cmd = ["python3", HELPER_SCRIPT, *args]
+        cmd = ["python3", helper_path, *args]
     else:
         if not shutil.which("pkexec"):
             return False, "pkexec binary not found. Please run with sudo."
-        cmd = ["pkexec", "python3", HELPER_SCRIPT, *args]
+        cmd = ["pkexec", "python3", helper_path, *args]
 
     if log_fn:
         log_fn("Requesting authorization (Polkit prompt)...")
@@ -145,6 +159,13 @@ def run_full_setup(
     browser_res = configure_all_browsers(log_fn=_log)
     result["details"]["browsers"] = browser_res
 
+    # Programmatic warm ATR reset to synchronize smart card post-daemon restart
+    if shutil.which("opensc-tool"):
+        try:
+            subprocess.run(["opensc-tool", "--reset", "warm"], capture_output=True, timeout=4)
+        except Exception:
+            pass
+
     # Step 4: Verify System State
     _progress(0.85, "Verifying hardware and browser integration...")
     card_stat = scan_smartcard()
@@ -218,12 +239,19 @@ exec python3 {quoted_script} "$@"
         if not os.path.isfile(icon_path):
             icon_path = os.path.join(project_dir, "sentinel_icon.png")
 
+        def escape_desktop_exec_arg(val: str) -> str:
+            """Escape an argument according to FreeDesktop Desktop Entry Exec key rules (CWE-88)."""
+            escaped = val.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$")
+            return f'"{escaped}"'
+
+        escaped_script = escape_desktop_exec_arg(script_target)
+
         # FreeDesktop spec requires argument quoting if path contains whitespace
         desktop_content = f"""[Desktop Entry]
 Name=Sentinel CAC Manager
 GenericName=DoW Smart Card Manager
 Comment=Automate DoW CAC Middleware, Certificates, and Browser Authentication
-Exec=python3 "{script_target}" --gui
+Exec=python3 {escaped_script} --gui
 Path={project_dir}
 Icon={icon_path}
 Terminal=false

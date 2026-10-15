@@ -21,10 +21,26 @@ class DashboardView(Gtk.Box):
     def __init__(self, main_window):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         self.main_window = main_window
+        self.set_hexpand(True)
+        self.set_vexpand(True)
         self.set_margin_top(16)
         self.set_margin_bottom(16)
         self.set_margin_start(24)
         self.set_margin_end(24)
+
+        self.scrolled = Gtk.ScrolledWindow()
+        self.scrolled.set_vexpand(True)
+        self.scrolled.set_hexpand(True)
+
+        self.clamp = Adw.Clamp()
+        self.clamp.set_maximum_size(1000)
+        self.clamp.set_tightening_threshold(800)
+        self.clamp.set_hexpand(True)
+
+        self.container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        self.clamp.set_child(self.container)
+        self.scrolled.set_child(self.clamp)
+        self.append(self.scrolled)
 
         self.setup_ui()
 
@@ -66,7 +82,7 @@ class DashboardView(Gtk.Box):
         hero_text.append(self.status_banner)
 
         hero_box.append(hero_text)
-        self.append(hero_box)
+        self.container.append(hero_box)
 
         # 2. Master One-Click Setup Card
         setup_group = Adw.PreferencesGroup()
@@ -106,7 +122,7 @@ class DashboardView(Gtk.Box):
         setup_row = Adw.ActionRow()
         setup_row.set_child(setup_box)
         setup_group.add(setup_row)
-        self.append(setup_group)
+        self.container.append(setup_group)
 
         # 3. Hardware & Smart Card Status
         self.hw_group = Adw.PreferencesGroup()
@@ -126,7 +142,7 @@ class DashboardView(Gtk.Box):
         self.card_row.add_suffix(self.card_badge)
         self.hw_group.add(self.card_row)
 
-        self.append(self.hw_group)
+        self.container.append(self.hw_group)
 
         # 4. Cardholder Identity Group (ActivClient details)
         self.id_group = Adw.PreferencesGroup()
@@ -144,7 +160,7 @@ class DashboardView(Gtk.Box):
         self.cert_status_row.set_subtitle("—")
         self.id_group.add(self.cert_status_row)
 
-        self.append(self.id_group)
+        self.container.append(self.id_group)
 
     def update_status(self, card_stat: SmartCardStatus, system_ready: bool):
         # Update Banner
@@ -153,11 +169,11 @@ class DashboardView(Gtk.Box):
             self.status_banner.remove_css_class("banner-warning")
             self.status_banner.add_css_class("banner-ready")
         elif not system_ready:
-            self.status_banner.set_label("⚠️ Setup Required — Click 'Automate Full CAC Setup' Below")
+            self.status_banner.set_label("Setup Required — Click 'Automate Full CAC Setup' Below")
             self.status_banner.remove_css_class("banner-ready")
             self.status_banner.add_css_class("banner-warning")
         else:
-            self.status_banner.set_label("ℹ️ System Configured — Insert CAC into Reader to Authenticate")
+            self.status_banner.set_label("System Configured — Insert CAC into Reader to Authenticate")
             self.status_banner.remove_css_class("banner-ready")
             self.status_banner.add_css_class("banner-warning")
 
@@ -180,13 +196,13 @@ class DashboardView(Gtk.Box):
             c_name = GLib.markup_escape_text(card_stat.card_name or "Common Access Card")
             t_serial = GLib.markup_escape_text(card_stat.token_serial or "Active")
             self.card_row.set_subtitle(f"{c_name} (Serial: {t_serial})")
-            self.card_badge.set_label("Inserted ●")
+            self.card_badge.set_label("Inserted")
             self.card_badge.remove_css_class("badge-warning")
             self.card_badge.remove_css_class("badge-danger")
             self.card_badge.add_css_class("badge-success")
         else:
             self.card_row.set_subtitle("Card slot empty. Please insert your DoW CAC.")
-            self.card_badge.set_label("No Card ○")
+            self.card_badge.set_label("No Card")
             self.card_badge.remove_css_class("badge-success")
             self.card_badge.add_css_class("badge-warning")
 

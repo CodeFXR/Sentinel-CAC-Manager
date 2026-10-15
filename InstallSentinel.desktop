@@ -2,8 +2,8 @@
 Name=Install Sentinel CAC Manager
 GenericName=DoW CAC Setup Wizard
 Comment=Graphical Setup Wizard for DoW CAC Middleware, Certificates, and Browser Authentication
-Exec=bash -c "D=\$(dirname \"%k\"); if [ -f \"\$D/installer.py\" ]; then python3 \"\$D/installer.py\"; elif [ -f \$HOME/.local/share/sentinel_cac_manager/installer.py ]; then python3 \$HOME/.local/share/sentinel_cac_manager/installer.py; else curl -fsSL https://raw.githubusercontent.com/CodeFXR/Sentinel-CAC-Manager/main/setup | bash; fi"
-Icon=sentinel_cac_manager
+Exec=bash -c "D=\$(dirname \"%k\"); if [ -f \"\$D/install\" ]; then \"\$D/install\" --gui; elif [ -f \"\$D/install.sh\" ]; then \"\$D/install.sh\" --gui; elif [ -f \"\$D/installer.py\" ]; then python3 \"\$D/installer.py\"; elif [ -f \$HOME/.local/share/sentinel_cac_manager/installer.py ]; then python3 \$HOME/.local/share/sentinel_cac_manager/installer.py; else curl -fsSL https://raw.githubusercontent.com/CodeFXR/Sentinel-CAC-Manager/main/install | bash -s -- --gui; fi"
+Icon=system-software-install
 Terminal=false
 Type=Application
 Categories=Utility;

@@ -154,6 +154,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         main_box.append(self.view_stack)
         self.view_stack.set_vexpand(True)
+        self.view_stack.set_hexpand(True)
 
     def show_toast(self, message: str):
         toast = Adw.Toast.new(message)

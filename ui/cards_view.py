@@ -13,6 +13,8 @@ class CardsView(Gtk.Box):
     def __init__(self, main_window):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         self.main_window = main_window
+        self.set_hexpand(True)
+        self.set_vexpand(True)
         self.set_margin_top(16)
         self.set_margin_bottom(16)
         self.set_margin_start(24)
@@ -23,8 +25,14 @@ class CardsView(Gtk.Box):
         self.scrolled.set_vexpand(True)
         self.scrolled.set_hexpand(True)
 
+        self.clamp = Adw.Clamp()
+        self.clamp.set_maximum_size(1000)
+        self.clamp.set_tightening_threshold(800)
+        self.clamp.set_hexpand(True)
+
         self.content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-        self.scrolled.set_child(self.content_box)
+        self.clamp.set_child(self.content_box)
+        self.scrolled.set_child(self.clamp)
         self.append(self.scrolled)
 
         # Empty state widget

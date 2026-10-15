@@ -23,6 +23,41 @@ def log(msg):
     print(f"[SENTINEL-ROOT] {msg}", flush=True)
 
 
+def reset_smartcard_atr():
+    """Trigger a warm card reset to avoid requiring physical card re-insertion after pcscd restart."""
+    tool = shutil.which("opensc-tool")
+    if tool:
+        try:
+            check = subprocess.run([tool, "-l"], capture_output=True, text=True, timeout=3)
+            if check.returncode == 0 and "Reader" in check.stdout:
+                res = subprocess.run([tool, "--reset", "warm"], capture_output=True, text=True, timeout=5)
+                if res.returncode == 0:
+                    log("Executed warm ATR reset on inserted smart card.")
+        except Exception as e:
+            log(f"Warm ATR reset note: {e}")
+
+
+def ensure_system_helper():
+    """Ensure privileged_helper.py is installed in root-owned /usr/libexec/sentinel/ (0755 root:root)."""
+    try:
+        sys_dir = "/usr/libexec/sentinel"
+        sys_helper = os.path.join(sys_dir, "privileged_helper.py")
+        current_script = os.path.abspath(__file__)
+        if current_script != sys_helper:
+            os.makedirs(sys_dir, exist_ok=True)
+            temp_dst = sys_helper + ".tmp"
+            shutil.copyfile(current_script, temp_dst)
+            os.chmod(temp_dst, 0o755)
+            try:
+                os.chown(temp_dst, 0, 0)
+            except Exception:
+                pass
+            os.replace(temp_dst, sys_helper)
+            log("Synchronized protected privileged helper to /usr/libexec/sentinel/privileged_helper.py")
+    except Exception as e:
+        log(f"System helper sync note: {e}")
+
+
 def enable_pcscd():
     log("Enabling and starting pcscd daemon...")
     res = subprocess.run(["systemctl", "enable", "--now", "pcscd.socket", "pcscd"], capture_output=True, text=True)
@@ -30,6 +65,7 @@ def enable_pcscd():
         log("pcscd service and socket enabled and started.")
     else:
         log(f"pcscd service warning: {res.stderr.strip()}")
+    reset_smartcard_atr()
 
 
 def fix_opensc_hang():
@@ -254,6 +290,9 @@ def main():
         log("ERROR: This helper must be run as root (via pkexec or sudo).")
         return 1
 
+    # Keep protected system helper in sync
+    ensure_system_helper()
+
     if args.packages or args.all:
         install_system_packages(args.family)
 
@@ -270,6 +309,9 @@ def main():
         install_firefox_policies(args.module, args.family)
         install_p11_kit_module(args.module)
         connect_snap_firefox()
+
+    # Final warm ATR sync to ensure card is immediately ready
+    reset_smartcard_atr()
 
     log("Elevated system configuration complete!")
     return 0

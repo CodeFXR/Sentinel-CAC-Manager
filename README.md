@@ -35,7 +35,27 @@ Sentinel CAC Manager verifies the smart card stack, installs the Department of W
 
 ## Setup
 
-Download **InstallSentinel.desktop** from the release page and launch it to start the graphical setup wizard. 
+### Option 1: Graphical Installation (Download Archive)
+
+1. Download **Sentinel-CAC-Manager.tar.gz** from the release page.
+2. Right-click the downloaded archive in your Downloads folder and select **Extract Here**.
+3. Open the extracted folder and launch the installer:
+   - **KDE Plasma / XFCE:** Double-click **Install Sentinel CAC Manager** and click **Execute**.
+   - **GNOME (Ubuntu / Fedora):** Right-click **Install Sentinel CAC Manager**, select **Allow Launching**, then double-click to start.
+
+### Option 2: Terminal Command
+
+Run the automated installer one-liner:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CodeFXR/Sentinel-CAC-Manager/main/install | bash
+```
+
+To launch the graphical setup wizard directly from the terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CodeFXR/Sentinel-CAC-Manager/main/install | bash -s -- --gui
+```
 
 The setup wizard inspects the host distribution, installs required system components and certificates, configures browser profiles, and adds Sentinel CAC Manager to the application menu.
 

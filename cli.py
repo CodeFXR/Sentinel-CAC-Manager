@@ -90,14 +90,14 @@ def cmd_card_info():
     print(f"Token Label:     {_clean_term(card_stat.token_label, 'Unknown')}")
     print(f"\n--- Certificates ({len(card_stat.certificates)}) ---")
     for c in card_stat.certificates:
-        print(f"  Object ID:     {c.id}")
-        print(f"  Label:         {c.label}")
-        print(f"  Subject:       {c.subject}")
-        print(f"  Holder Name:   {c.holder_name}")
-        print(f"  EDIPI:         {c.edipi}")
-        print(f"  Issuer:        {c.issuer}")
-        print(f"  Validity:      {c.valid_to_str} ({c.status_text})")
-        print(f"  Usage:         {c.usage}")
+        print(f"  Object ID:     {_clean_term(c.id, 'N/A')}")
+        print(f"  Label:         {_clean_term(c.label, 'Unknown')}")
+        print(f"  Subject:       {_clean_term(c.subject, 'Unknown')}")
+        print(f"  Holder Name:   {_clean_term(c.holder_name, 'Unknown')}")
+        print(f"  EDIPI:         {_clean_term(c.edipi, 'Unknown')}")
+        print(f"  Issuer:        {_clean_term(c.issuer, 'Unknown')}")
+        print(f"  Validity:      {_clean_term(c.valid_to_str, 'Unknown')} ({_clean_term(c.status_text, 'Unknown')})")
+        print(f"  Usage:         {_clean_term(c.usage, 'Unknown')}")
         print("  " + "-" * 40)
 
 

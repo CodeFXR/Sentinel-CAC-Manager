@@ -24,10 +24,26 @@ class DiagnosticsView(Gtk.Box):
     def __init__(self, main_window):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         self.main_window = main_window
+        self.set_hexpand(True)
+        self.set_vexpand(True)
         self.set_margin_top(16)
         self.set_margin_bottom(16)
         self.set_margin_start(24)
         self.set_margin_end(24)
+
+        self.scrolled = Gtk.ScrolledWindow()
+        self.scrolled.set_vexpand(True)
+        self.scrolled.set_hexpand(True)
+
+        self.clamp = Adw.Clamp()
+        self.clamp.set_maximum_size(1000)
+        self.clamp.set_tightening_threshold(800)
+        self.clamp.set_hexpand(True)
+
+        self.container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        self.clamp.set_child(self.container)
+        self.scrolled.set_child(self.clamp)
+        self.append(self.scrolled)
 
         self.setup_ui()
 
@@ -47,7 +63,7 @@ class DiagnosticsView(Gtk.Box):
             row.add_suffix(btn)
             portal_group.add(row)
 
-        self.append(portal_group)
+        self.container.append(portal_group)
 
         # 2. Activity Log Group
         log_group = Adw.PreferencesGroup()
@@ -88,7 +104,7 @@ class DiagnosticsView(Gtk.Box):
 
         log_row.set_child(log_box)
         log_group.add(log_row)
-        self.append(log_group)
+        self.container.append(log_group)
 
     def open_url(self, url: str):
         try:
