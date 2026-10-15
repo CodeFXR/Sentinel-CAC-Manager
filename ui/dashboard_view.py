@@ -10,7 +10,6 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Adw, GdkPixbuf, GLib
 
 from core.smartcard import SmartCardStatus
-from core.system_fix import run_full_setup
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ICON_PATH = os.path.join(SCRIPT_DIR, "sentinel_cac_manager.png")
@@ -215,6 +214,8 @@ class DashboardView(Gtk.Box):
         self.step_label.set_label("Starting automated setup...")
 
         def _worker():
+            from core.system_fix import run_full_setup
+
             def _progress_cb(frac, msg):
                 GLib.idle_add(self._update_progress, frac, msg)
 

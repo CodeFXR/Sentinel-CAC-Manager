@@ -18,7 +18,6 @@ from core.platform_detector import (
     is_snap_firefox_installed,
     find_opensc_module,
 )
-from core.certificates import import_root_cas_to_nss, FULL_CHAIN_PEM, FULL_CHAIN_CRT
 
 logger = logging.getLogger("sentinel.browsers")
 
@@ -223,6 +222,7 @@ def configure_chrome_nssdb(module_path: str, log_fn=None) -> Tuple[bool, str]:
         logger.warning(f"Chrome modutil error: {e}")
 
     # Import root CAs into ~/.pki/nssdb
+    from core.certificates import import_root_cas_to_nss
     count, errors = import_root_cas_to_nss(nssdb, log_fn)
     if log_fn:
         log_fn(f"[Chrome] Imported {count} DoW CA certificates into ~/.pki/nssdb")
@@ -282,6 +282,7 @@ def configure_all_browsers(log_fn=None) -> Dict[str, Any]:
             results["errors"].append(f"Failed to update pkcs11.txt in {p_name}")
 
         # C. Import CAs into cert9.db
+        from core.certificates import import_root_cas_to_nss
         cnt, errs = import_root_cas_to_nss(p, log_fn=None)
         if log_fn:
             log_fn(f"   [OK] Imported {cnt} DoW CAs into cert9.db")

@@ -9,13 +9,6 @@ import re
 
 from typing import Optional
 
-from core.platform_detector import detect_platform, get_firefox_profile_dirs
-from core.smartcard import scan_smartcard, is_pcscd_active
-from core.certificates import is_system_trust_installed, get_available_certificates
-from core.browsers import check_browsers_status, configure_all_browsers
-from core.system_fix import run_full_setup, run_privileged_helper, check_missing_packages
-from core.rust_bridge import is_rust_available, get_rust_version
-
 
 def _clean_term(text: Optional[str], default: str = "Unknown") -> str:
     """Sanitize strings for terminal output to prevent control sequence injection (CWE-150)."""
@@ -36,6 +29,13 @@ def print_banner():
 
 
 def cmd_status():
+    from core.platform_detector import detect_platform
+    from core.smartcard import scan_smartcard
+    from core.browsers import check_browsers_status
+    from core.certificates import is_system_trust_installed
+    from core.system_fix import check_missing_packages
+    from core.rust_bridge import is_rust_available, get_rust_version
+
     plat = detect_platform()
     card_stat = scan_smartcard()
     b_stat = check_browsers_status()
@@ -77,6 +77,8 @@ def cmd_status():
 
 
 def cmd_card_info():
+    from core.smartcard import scan_smartcard
+
     card_stat = scan_smartcard()
     if not card_stat.card_present:
         print("No smart card detected in reader.")
@@ -100,6 +102,8 @@ def cmd_card_info():
 
 
 def cmd_setup():
+    from core.system_fix import run_full_setup
+
     print("Initiating Full Automated DoW CAC Setup...")
     res = run_full_setup(
         progress_callback=lambda frac, msg: print(f"[{int(frac * 100)}%] {msg}"),
@@ -144,12 +148,16 @@ def main():
     elif args.card_info:
         cmd_card_info()
     elif args.browsers:
+        from core.browsers import configure_all_browsers
         print("Configuring browsers...")
         configure_all_browsers(log_fn=print)
     elif args.certs:
+        from core.platform_detector import detect_platform
+        from core.system_fix import run_privileged_helper
         plat = detect_platform()
         run_privileged_helper(["--certs", "--family", plat.family], log_fn=print)
     elif args.reader_fix:
+        from core.system_fix import run_privileged_helper
         run_privileged_helper(["--reader-fix"], log_fn=print)
     else:
         # Default when run without args in terminal: show status or launch GUI if DISPLAY is available

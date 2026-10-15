@@ -17,7 +17,6 @@ from core.browsers import (
     configure_chrome_nssdb,
     find_opensc_module,
 )
-from core.system_fix import run_privileged_helper
 
 
 class SystemView(Gtk.Box):
@@ -229,6 +228,7 @@ class SystemView(Gtk.Box):
         threading.Thread(target=self._run_start_pcscd, daemon=True).start()
 
     def _run_start_pcscd(self):
+        from core.system_fix import run_privileged_helper
         ok, msg = run_privileged_helper(["--service"], log_fn=self.main_window.append_log)
         GLib.idle_add(self._after_action, ok, "pcscd service started", msg)
 
@@ -237,6 +237,7 @@ class SystemView(Gtk.Box):
         threading.Thread(target=self._run_fix_reader, daemon=True).start()
 
     def _run_fix_reader(self):
+        from core.system_fix import run_privileged_helper
         ok, msg = run_privileged_helper(["--reader-fix"], log_fn=self.main_window.append_log)
         GLib.idle_add(self._after_action, ok, "Reader hang fix applied", msg)
 
@@ -246,6 +247,7 @@ class SystemView(Gtk.Box):
         threading.Thread(target=self._run_install_certs, args=(plat.family,), daemon=True).start()
 
     def _run_install_certs(self, family: str):
+        from core.system_fix import run_privileged_helper
         ok, msg = run_privileged_helper(["--certs", "--family", family], log_fn=self.main_window.append_log)
         GLib.idle_add(self._after_action, ok, "DoW certificates installed into system trust", msg)
 

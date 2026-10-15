@@ -21,13 +21,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger("sentinel.rust_bridge")
 
 _sentinel_core = None
+_INITIALIZED = False
 IS_RUST_AVAILABLE = False
 
 
-def _init_rust_module():
-    global _sentinel_core, IS_RUST_AVAILABLE
-    if _sentinel_core is not None:
+def _ensure_init():
+    global _sentinel_core, IS_RUST_AVAILABLE, _INITIALIZED
+    if _INITIALIZED:
         return
+    _INITIALIZED = True
 
     # 1. Try standard Python import
     try:
@@ -68,11 +70,9 @@ def _init_rust_module():
     logger.debug("Native sentinel_core module not found or failed to load; using pure-Python fallbacks.")
 
 
-_init_rust_module()
-
-
 def is_rust_available() -> bool:
     """Return True if native sentinel_core accelerator is loaded and operational."""
+    _ensure_init()
     return IS_RUST_AVAILABLE and _sentinel_core is not None
 
 
@@ -220,7 +220,15 @@ class _PyPinBuffer:
         self.scrub()
 
 
-if is_rust_available() and hasattr(_sentinel_core, "PinBuffer"):
-    PinBuffer = _sentinel_core.PinBuffer
-else:
-    PinBuffer = _PyPinBuffer
+class PinBuffer:
+    """Memory-hardened buffer for sensitive credentials (PINs/PUKs).
+
+    Delegates to native Rust PinBuffer with ZeroizeOnDrop if available,
+    or transparently falls back to _PyPinBuffer.
+    """
+
+    def __new__(cls, pin: str):
+        _ensure_init()
+        if IS_RUST_AVAILABLE and _sentinel_core is not None and hasattr(_sentinel_core, "PinBuffer"):
+            return _sentinel_core.PinBuffer(pin)
+        return _PyPinBuffer(pin)
