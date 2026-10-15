@@ -535,8 +535,15 @@ class InstallerWindow(Adw.Window):
         self.progress_bar.set_fraction(0.05)
         self.prog_status_lbl.set_label("Initializing setup routine...")
 
+        opts = {
+            "middleware": self.switch_middleware.get_active(),
+            "certs": self.switch_certs.get_active(),
+            "browsers": self.switch_browsers.get_active(),
+            "desktop": self.switch_desktop.get_active(),
+        }
+
         # Run in thread
-        threading.Thread(target=self._run_installer_worker, daemon=True).start()
+        threading.Thread(target=self._run_installer_worker, args=(opts,), daemon=True).start()
 
     def _append_log(self, text: str):
         GLib.idle_add(self._ui_append_log, text)
@@ -574,15 +581,15 @@ class InstallerWindow(Adw.Window):
         self.progress_bar.set_fraction(frac)
         self.prog_status_lbl.set_label(msg)
 
-    def _run_installer_worker(self):
+    def _run_installer_worker(self, opts: dict):
         self._append_log("=================================================================")
         self._append_log(f"   Sentinel v2 Setup Wizard on {self.platform.name}")
         self._append_log("=================================================================")
 
-        do_middleware = self.switch_middleware.get_active()
-        do_certs = self.switch_certs.get_active()
-        do_browsers = self.switch_browsers.get_active()
-        do_desktop = self.switch_desktop.get_active()
+        do_middleware = opts["middleware"]
+        do_certs = opts["certs"]
+        do_browsers = opts["browsers"]
+        do_desktop = opts["desktop"]
 
         # Step 1: Packages & Middleware
         if do_middleware:

@@ -54,9 +54,13 @@ class CardsView(Gtk.Box):
 
         # Header info
         header_group = Adw.PreferencesGroup()
-        header_group.set_title(f"Inserted Card: {card_stat.token_label or 'DoW CAC'}")
+        label_text = GLib.markup_escape_text(card_stat.token_label or "DoW CAC")
+        header_group.set_title(f"Inserted Card: {label_text}")
+        r_text = GLib.markup_escape_text(card_stat.reader_name or "PCSC")
+        s_text = GLib.markup_escape_text(card_stat.token_serial or "Active")
+        a_text = GLib.markup_escape_text(card_stat.atr or "N/A")
         header_group.set_description(
-            f"Reader: {card_stat.reader_name or 'PCSC'} | Serial: {card_stat.token_serial or 'Active'} | ATR: {card_stat.atr or 'N/A'}"
+            f"Reader: {r_text} | Serial: {s_text} | ATR: {a_text}"
         )
         self.content_box.append(header_group)
 

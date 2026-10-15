@@ -356,7 +356,7 @@ def check_browsers_status() -> BrowserStatus:
     chrome_module = False
     if chrome_db_exists and shutil.which("modutil"):
         try:
-            res = subprocess.run([shutil.which("modutil"), "-dbdir", f"sql:{nssdb}", "-list"], capture_output=True, text=True, timeout=2)
+            res = subprocess.run([shutil.which("modutil"), "-dbdir", f"sql:{nssdb}", "-list"], capture_output=True, text=True, timeout=6)
             if "DoW CAC" in res.stdout or "DoD CAC" in res.stdout or "p11-kit-proxy" in res.stdout or "OpenSC" in res.stdout:
                 chrome_module = True
         except Exception:
@@ -366,7 +366,7 @@ def check_browsers_status() -> BrowserStatus:
     snap_connected = False
     if snap_detected:
         try:
-            res = subprocess.run(["snap", "connections", "firefox"], capture_output=True, text=True, timeout=2)
+            res = subprocess.run(["snap", "connections", "firefox"], capture_output=True, text=True, timeout=4)
             if "pcscd" in res.stdout and "firefox:pcscd" in res.stdout:
                 snap_connected = True
         except Exception:

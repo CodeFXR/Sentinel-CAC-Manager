@@ -73,10 +73,7 @@ if [ -f "${ICON_SRC}" ]; then
 fi
 
 # 5. Create launcher symlinks in ~/.local/bin
-cat <<EOF > "${BIN_DIR}/sentinel-cac-manager"
-#!/usr/bin/env bash
-exec python3 "${SCRIPT_DIR}/sentinel_cac_manager.py" "\$@"
-EOF
+printf '#!/usr/bin/env bash\nexec python3 %%q "$@"\n' "${SCRIPT_DIR}/sentinel_cac_manager.py" > "${BIN_DIR}/sentinel-cac-manager"
 chmod +x "${BIN_DIR}/sentinel-cac-manager"
 ln -sf "${BIN_DIR}/sentinel-cac-manager" "${BIN_DIR}/sentinel"
 ln -sf "${BIN_DIR}/sentinel-cac-manager" "${BIN_DIR}/sentinel-v2"
@@ -91,7 +88,7 @@ cat <<EOF > "${APP_DIR}/sentinel_cac_manager.desktop"
 Name=Sentinel CAC Manager
 GenericName=DoW Smart Card Manager
 Comment=Automate DoW CAC Middleware, Certificates, and Browser Authentication
-Exec=python3 ${SCRIPT_DIR}/sentinel_cac_manager.py --gui
+Exec=python3 "${SCRIPT_DIR}/sentinel_cac_manager.py" --gui
 Path=${SCRIPT_DIR}
 Icon=${ICON_DIR}/sentinel_cac_manager.png
 Terminal=false

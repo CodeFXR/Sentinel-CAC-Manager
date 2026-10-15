@@ -46,21 +46,25 @@ class SmartCardStatus:
     @property
     def primary_certificate(self) -> Optional[CardCertificate]:
         for c in self.certificates:
-            if "0005" in c.id or "Cert 5" in c.label or "ID" in c.usage:
+            if "0005" in c.id or c.id in ("01", "1") or "Cert 5" in c.label or "ID" in c.usage or "PIV" in c.usage:
                 return c
         return self.certificates[0] if self.certificates else None
 
 
+_CERT_CACHE: Dict[str, List[CardCertificate]] = {}
+
+
 def is_pcscd_active() -> bool:
-    """Check if pcscd daemon is active and running."""
+    """Check if pcscd daemon or activation socket is active and running."""
     try:
         res = subprocess.run(
-            ["systemctl", "is-active", "pcscd"],
+            ["systemctl", "is-active", "pcscd.socket", "pcscd"],
             capture_output=True,
             text=True,
-            timeout=3,
+            timeout=2,
         )
-        return res.stdout.strip() == "active"
+        states = res.stdout.strip().splitlines()
+        return any(s == "active" for s in states)
     except Exception as e:
         logger.debug(f"Failed to check pcscd status: {e}")
         return False
@@ -130,12 +134,17 @@ def _parse_x509_text(out_text: str, cert_id: str, label: str, usage: str) -> Car
             # DoW CAC standard name formatting: LAST.FIRST.MIDDLE.EDIPI -> FIRST MIDDLE LAST
             name_parts = parts[:-1]
             if len(name_parts) >= 2:
-                # E.g. DOE JOHN A -> JOHN A DOE
                 last = name_parts[0]
                 first_middle = " ".join(name_parts[1:])
                 holder_name = f"{first_middle} {last}".title()
             else:
                 holder_name = " ".join(name_parts).title()
+
+    if not edipi:
+        # Fallback regex for 10-digit DoD EDIPI anywhere in subject
+        m = re.search(r"\b(\d{10})\b", subject)
+        if m:
+            edipi = m.group(1)
 
     return CardCertificate(
         id=cert_id,
@@ -157,20 +166,64 @@ def _parse_x509_text(out_text: str, cert_id: str, label: str, usage: str) -> Car
 
 
 def read_card_certificates() -> List[CardCertificate]:
-    """Read and parse all X.509 certificates from the inserted CAC."""
+    """Read and parse all X.509 certificates from the inserted CAC with dynamic discovery."""
     certs: List[CardCertificate] = []
-    cert_specs = [
-        ("0005", "CAC ID / PIV Authentication", "DoW Web Logon, PIV Mutual Authentication"),
-        ("0002", "CAC Email Signature", "S/MIME Digital Email Signing"),
-        ("0003", "CAC Email Encryption", "S/MIME Key Management and Decryption"),
-        ("0004", "CAC Device Authentication", "Device / Card Authentication"),
-    ]
-
     pkcs15_tool = shutil.which("pkcs15-tool")
     if not pkcs15_tool:
         return certs
 
-    for cid, label, usage in cert_specs:
+    known_specs = {
+        "0005": ("CAC ID / PIV Authentication", "DoW Web Logon, PIV Mutual Authentication"),
+        "01": ("CAC ID / PIV Authentication", "DoW Web Logon, PIV Mutual Authentication"),
+        "1": ("CAC ID / PIV Authentication", "DoW Web Logon, PIV Mutual Authentication"),
+        "0002": ("CAC Email Signature", "S/MIME Digital Email Signing"),
+        "02": ("CAC Email Signature", "S/MIME Digital Email Signing"),
+        "2": ("CAC Email Signature", "S/MIME Digital Email Signing"),
+        "0003": ("CAC Email Encryption", "S/MIME Key Management and Decryption"),
+        "03": ("CAC Email Encryption", "S/MIME Key Management and Decryption"),
+        "3": ("CAC Email Encryption", "S/MIME Key Management and Decryption"),
+        "0004": ("CAC Device Authentication", "Device / Card Authentication"),
+        "04": ("CAC Device Authentication", "Device / Card Authentication"),
+        "4": ("CAC Device Authentication", "Device / Card Authentication"),
+    }
+
+    # 1. Attempt dynamic certificate enumeration via pkcs15-tool -c
+    candidate_ids: List[Tuple[str, str, str]] = []
+    try:
+        res_list = subprocess.run([pkcs15_tool, "-c"], capture_output=True, text=True, timeout=5)
+        current_id = None
+        current_label = None
+        for line in res_list.stdout.splitlines():
+            line_s = line.strip()
+            if line_s.startswith("ID :") or line_s.startswith("ID:"):
+                current_id = line_s.split(":", 1)[1].strip()
+            elif line_s.startswith("Label :") or line_s.startswith("Label:"):
+                current_label = line_s.split(":", 1)[1].strip()
+                if current_id:
+                    spec = known_specs.get(current_id, (current_label or f"Certificate {current_id}", "Smart Card Credential"))
+                    candidate_ids.append((current_id, spec[0], spec[1]))
+                    current_id = None
+                    current_label = None
+    except Exception as e:
+        logger.debug(f"Dynamic cert list query failed: {e}")
+
+    # Fallback to standard probed IDs across cac and piv-II drivers
+    if not candidate_ids:
+        candidate_ids = [
+            ("0005", "CAC ID / PIV Authentication", "DoW Web Logon, PIV Mutual Authentication"),
+            ("01", "CAC ID / PIV Authentication", "DoW Web Logon, PIV Mutual Authentication"),
+            ("0002", "CAC Email Signature", "S/MIME Digital Email Signing"),
+            ("02", "CAC Email Signature", "S/MIME Digital Email Signing"),
+            ("0003", "CAC Email Encryption", "S/MIME Key Management and Decryption"),
+            ("03", "CAC Email Encryption", "S/MIME Key Management and Decryption"),
+            ("0004", "CAC Device Authentication", "Device / Card Authentication"),
+            ("04", "CAC Device Authentication", "Device / Card Authentication"),
+        ]
+
+    seen_ids = set()
+    for cid, label, usage in candidate_ids:
+        if cid in seen_ids:
+            continue
         try:
             res_cert = subprocess.run(
                 [pkcs15_tool, "--read-certificate", cid],
@@ -178,19 +231,31 @@ def read_card_certificates() -> List[CardCertificate]:
                 timeout=4,
             )
             raw_der = res_cert.stdout
-            if not raw_der or b"BEGIN CERTIFICATE" not in raw_der and len(raw_der) < 64:
+            if not raw_der or (b"BEGIN CERTIFICATE" not in raw_der and len(raw_der) < 64):
                 continue
 
+            # OpenSSL DER parse
             res_x509 = subprocess.run(
-                ["openssl", "x509", "-noout", "-subject", "-issuer", "-dates", "-serial"],
+                ["openssl", "x509", "-inform", "DER", "-noout", "-subject", "-issuer", "-dates", "-serial"],
                 input=raw_der,
                 capture_output=True,
                 timeout=3,
             )
             out = res_x509.stdout.decode(errors="replace")
+            if "subject=" not in out:
+                # Retry without -inform DER in case it was emitted as PEM
+                res_x509 = subprocess.run(
+                    ["openssl", "x509", "-noout", "-subject", "-issuer", "-dates", "-serial"],
+                    input=raw_der,
+                    capture_output=True,
+                    timeout=3,
+                )
+                out = res_x509.stdout.decode(errors="replace")
+
             if "subject=" in out:
                 parsed = _parse_x509_text(out, cid, label, usage)
                 certs.append(parsed)
+                seen_ids.add(cid)
         except Exception as e:
             logger.debug(f"Failed to read certificate {cid}: {e}")
 
@@ -198,7 +263,7 @@ def read_card_certificates() -> List[CardCertificate]:
 
 
 def scan_smartcard() -> SmartCardStatus:
-    """Comprehensive hardware & token inspection."""
+    """Comprehensive hardware & token inspection with in-memory caching to eliminate flapping."""
     active = is_pcscd_active()
     reader_name = None
     card_present = False
@@ -212,7 +277,8 @@ def scan_smartcard() -> SmartCardStatus:
     pkcs11_tool = shutil.which("pkcs11-tool")
 
     # 1. Detect Readers and Card presence via opensc-tool
-    if opensc_tool and active:
+    # Do not gate on 'active' since opensc-tool triggers socket activation on demand
+    if opensc_tool:
         try:
             res_list = subprocess.run([opensc_tool, "-l"], capture_output=True, text=True, timeout=3)
             for line in res_list.stdout.splitlines():
@@ -221,6 +287,7 @@ def scan_smartcard() -> SmartCardStatus:
                     if len(parts) >= 3 and parts[0].isdigit():
                         card_present = (parts[1].lower() == "yes")
                         reader_name = " ".join(parts[2:]).strip()
+                        active = True
                         break
 
             if card_present:
@@ -250,9 +317,18 @@ def scan_smartcard() -> SmartCardStatus:
         except Exception as e:
             logger.debug(f"pkcs11-tool scan failed: {e}")
 
-    # 3. Read Certificates if card is present
+    # 3. Read Certificates if card is present (using ATR cache to prevent flapping & lock collisions)
     if card_present:
-        certificates = read_card_certificates()
+        cache_key = atr or reader_name or "card"
+        if cache_key in _CERT_CACHE and _CERT_CACHE[cache_key]:
+            certificates = _CERT_CACHE[cache_key]
+        else:
+            certificates = read_card_certificates()
+            if certificates:
+                _CERT_CACHE[cache_key] = certificates
+    else:
+        # Clear cache when reader is empty
+        _CERT_CACHE.clear()
 
     return SmartCardStatus(
         service_active=active,

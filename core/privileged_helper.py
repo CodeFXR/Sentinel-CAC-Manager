@@ -16,10 +16,7 @@ ALL_CAS_DIR = os.path.join(CERTS_DIR, "all_cas")
 FULL_CHAIN_PEM = os.path.join(CERTS_DIR, "DoW_Full_Chain.pem")
 FULL_CHAIN_CRT = os.path.join(CERTS_DIR, "DoW_Full_Chain.crt")
 
-OPENSC_BLOCK = """# Added by Sentinel CAC Manager.
-# Restricts card drivers to skip the 26-second Broadcom 58200 setcos probe hang.
-card_drivers = piv-II, cac, cac1
-"""
+OPENSC_DIRECTIVE = "card_drivers = piv-II, cac, cac1;"
 
 
 def log(msg):
@@ -54,28 +51,51 @@ def fix_opensc_hang():
         except OSError:
             pass
 
-    if "card_drivers" in original and "piv-II" in original:
+    # Check if card_drivers is already set inside the configuration
+    if "card_drivers" in original and ("piv-II" in original or "PIV-II" in original):
         log(f"OpenSC already optimized in {target_conf}")
         return
 
     # Backup if exists
     bak = f"{target_conf}.sentinel-bak"
     if os.path.isfile(target_conf) and not os.path.isfile(bak):
-        shutil.copy2(target_conf, bak)
-        log(f"Backed up original configuration to {bak}")
+        try:
+            shutil.copy2(target_conf, bak)
+            log(f"Backed up original configuration to {bak}")
+        except Exception as e:
+            log(f"Backup notice: {e}")
 
-    updated = original.rstrip()
-    if updated and not updated.endswith("\n"):
-        updated += "\n"
-    updated += f"\n{OPENSC_BLOCK}\n"
+    # OpenSC requires card_drivers to be inside an app default { ... } block and end with a semicolon
+    if "app default {" in original:
+        idx = original.find("app default {") + len("app default {")
+        updated = original[:idx] + f"\n\t# Restricts card drivers to skip the 26-second Broadcom 58200 setcos probe hang.\n\t{OPENSC_DIRECTIVE}\n" + original[idx:]
+    elif original.strip():
+        updated = original.rstrip() + f"\n\napp default {{\n\t# Added by Sentinel CAC Manager.\n\t{OPENSC_DIRECTIVE}\n}}\n"
+    else:
+        updated = f"""app default {{
+\t# Added by Sentinel CAC Manager.
+\t# Restricts card drivers to skip the 26-second Broadcom 58200 setcos probe hang.
+\t{OPENSC_DIRECTIVE}
+}}
+"""
 
     try:
         os.makedirs(os.path.dirname(target_conf), exist_ok=True)
         with open(target_conf, "w") as f:
             f.write(updated)
+        os.chmod(target_conf, 0o644)
         log(f"Optimized {target_conf} with CAC/PIV drivers.")
     except Exception as e:
         log(f"Failed to update {target_conf}: {e}")
+
+
+def _write_secure_cert(src_path: str, dst_path: str):
+    """Write certificate bytes with explicit non-executable mode 0644."""
+    with open(src_path, "rb") as f_in:
+        data = f_in.read()
+    with open(dst_path, "wb") as f_out:
+        f_out.write(data)
+    os.chmod(dst_path, 0o644)
 
 
 def install_system_certificates(distro_family: str):
@@ -89,8 +109,12 @@ def install_system_certificates(distro_family: str):
                 if fname.endswith(".crt"):
                     src = os.path.join(ALL_CAS_DIR, fname)
                     dst = os.path.join(target_dir, fname)
-                    shutil.copy2(src, dst)
+                    _write_secure_cert(src, dst)
                     count += 1
+        # Also deploy the full chain CRT bundle for applications that reference it
+        if os.path.isfile(FULL_CHAIN_CRT):
+            _write_secure_cert(FULL_CHAIN_CRT, os.path.join(target_dir, "DoW_Full_Chain.crt"))
+            count += 1
         log(f"Copied {count} CA certificates to {target_dir}")
         res = subprocess.run(["update-ca-certificates", "--fresh"], capture_output=True, text=True)
         log(f"Ran update-ca-certificates: {res.stdout.strip()}")
@@ -98,7 +122,7 @@ def install_system_certificates(distro_family: str):
         target_dir = "/etc/pki/ca-trust/source/anchors"
         os.makedirs(target_dir, exist_ok=True)
         dst = os.path.join(target_dir, "DoW_Full_Chain.pem")
-        shutil.copy2(FULL_CHAIN_PEM, dst)
+        _write_secure_cert(FULL_CHAIN_PEM, dst)
         log(f"Installed full trust bundle into {dst}")
         res = subprocess.run(["update-ca-trust"], capture_output=True, text=True)
         log("Ran update-ca-trust successfully.")
@@ -107,7 +131,7 @@ def install_system_certificates(distro_family: str):
         target_dir = "/usr/local/share/ca-certificates/dow"
         os.makedirs(target_dir, exist_ok=True)
         if os.path.isfile(FULL_CHAIN_CRT):
-            shutil.copy2(FULL_CHAIN_CRT, os.path.join(target_dir, "DoW_Full_Chain.crt"))
+            _write_secure_cert(FULL_CHAIN_CRT, os.path.join(target_dir, "DoW_Full_Chain.crt"))
         subprocess.run(["update-ca-certificates"], capture_output=True)
         log("Updated system ca certificates.")
 
@@ -204,6 +228,14 @@ def install_system_packages(distro_family: str):
         else:
             log(f"dnf note: {res.stderr.strip() or res.stdout.strip()}")
 
+    # Reload and trigger udev USB rules so pcscd user gains immediate access to connected readers
+    log("Reloading and triggering udev rules for smart card readers...")
+    try:
+        subprocess.run(["udevadm", "control", "--reload-rules"], capture_output=True)
+        subprocess.run(["udevadm", "trigger", "--action=add", "--subsystem-match=usb"], capture_output=True)
+    except Exception as e:
+        log(f"udevadm trigger note: {e}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Sentinel Root Helper")
@@ -222,7 +254,7 @@ def main():
         log("ERROR: This helper must be run as root (via pkexec or sudo).")
         return 1
 
-    if args.packages or (args.all and args.packages):
+    if args.packages or args.all:
         install_system_packages(args.family)
 
     if args.all or args.service:

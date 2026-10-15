@@ -5,12 +5,20 @@ from __future__ import annotations
 import argparse
 import sys
 import os
+import re
 
 from core.platform_detector import detect_platform, get_firefox_profile_dirs
 from core.smartcard import scan_smartcard, is_pcscd_active
 from core.certificates import is_system_trust_installed, get_available_certificates
 from core.browsers import check_browsers_status, configure_all_browsers
 from core.system_fix import run_full_setup, run_privileged_helper, check_missing_packages
+
+
+def _clean_term(text: Optional[str], default: str = "Unknown") -> str:
+    """Sanitize strings for terminal output to prevent control sequence injection (CWE-150)."""
+    if not text:
+        return default
+    return re.sub(r"[\x00-\x1f\x7f-\x9f]", "?", str(text))
 
 
 def print_banner():
@@ -49,17 +57,17 @@ def cmd_status():
     print("-" * 65)
     print(f" SMART CARD HARDWARE")
     print("-" * 65)
-    print(f"  Reader:                {card_stat.reader_name or 'No smart card reader found'}")
+    print(f"  Reader:                {_clean_term(card_stat.reader_name, 'No smart card reader found')}")
     print(f"  Card Inserted:         {'YES' if card_stat.card_present else 'NO'}")
     if card_stat.card_present:
-        print(f"  Card Type:             {card_stat.card_name or 'Common Access Card'}")
-        print(f"  Token Label:           {card_stat.token_label or 'Unknown'}")
-        print(f"  Cardholder Name:       {card_stat.primary_certificate.holder_name if card_stat.primary_certificate else 'Unknown'}")
-        print(f"  EDIPI / DoW ID:        {card_stat.primary_certificate.edipi if card_stat.primary_certificate else 'Unknown'}")
-        print(f"  ATR:                   {card_stat.atr or 'N/A'}")
+        print(f"  Card Type:             {_clean_term(card_stat.card_name, 'Common Access Card')}")
+        print(f"  Token Label:           {_clean_term(card_stat.token_label)}")
+        print(f"  Cardholder Name:       {_clean_term(card_stat.primary_certificate.holder_name if card_stat.primary_certificate else None)}")
+        print(f"  EDIPI / DoW ID:        {_clean_term(card_stat.primary_certificate.edipi if card_stat.primary_certificate else None)}")
+        print(f"  ATR:                   {_clean_term(card_stat.atr, 'N/A')}")
         print(f"  On-Card Certificates:  {len(card_stat.certificates)}")
         for c in card_stat.certificates:
-            print(f"    * [{c.id}] {c.label}: Issuer: {c.issuer_cn} | {c.status_text}")
+            print(f"    * [{_clean_term(c.id)}] {_clean_term(c.label)}: Issuer: {_clean_term(c.issuer_cn)} | {_clean_term(c.status_text)}")
     print("-" * 65)
 
 
@@ -69,10 +77,10 @@ def cmd_card_info():
         print("No smart card detected in reader.")
         return
     print("\n--- Inserted Smart Card Details ---")
-    print(f"Reader:          {card_stat.reader_name}")
-    print(f"Card Model:      {card_stat.card_name}")
-    print(f"Token Serial:    {card_stat.token_serial}")
-    print(f"Token Label:     {card_stat.token_label}")
+    print(f"Reader:          {_clean_term(card_stat.reader_name, 'Unknown')}")
+    print(f"Card Model:      {_clean_term(card_stat.card_name, 'Unknown')}")
+    print(f"Token Serial:    {_clean_term(card_stat.token_serial, 'Unknown')}")
+    print(f"Token Label:     {_clean_term(card_stat.token_label, 'Unknown')}")
     print(f"\n--- Certificates ({len(card_stat.certificates)}) ---")
     for c in card_stat.certificates:
         print(f"  Object ID:     {c.id}")

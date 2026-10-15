@@ -54,7 +54,7 @@ _FAMILY_CONFIGS = {
             "p11-kit",
             "p11-kit-modules",
         ),
-        "trust_dir": "/usr/local/share/ca-certificates/dod",
+        "trust_dir": "/usr/local/share/ca-certificates/dow",
         "trust_refresh_cmd": ("update-ca-certificates",),
         "cert_extension": ".crt",
     },

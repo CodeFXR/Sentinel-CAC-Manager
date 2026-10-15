@@ -164,7 +164,8 @@ class DashboardView(Gtk.Box):
 
         # Update Reader
         if card_stat.reader_name:
-            self.reader_row.set_subtitle(card_stat.reader_name)
+            r_name = GLib.markup_escape_text(card_stat.reader_name)
+            self.reader_row.set_subtitle(r_name)
             self.reader_badge.set_label("Connected")
             self.reader_badge.remove_css_class("badge-warning")
             self.reader_badge.remove_css_class("badge-danger")
@@ -177,7 +178,9 @@ class DashboardView(Gtk.Box):
 
         # Update Card Presence
         if card_stat.card_present:
-            self.card_row.set_subtitle(f"{card_stat.card_name or 'Common Access Card'} (Serial: {card_stat.token_serial or 'Active'})")
+            c_name = GLib.markup_escape_text(card_stat.card_name or "Common Access Card")
+            t_serial = GLib.markup_escape_text(card_stat.token_serial or "Active")
+            self.card_row.set_subtitle(f"{c_name} (Serial: {t_serial})")
             self.card_badge.set_label("Inserted ●")
             self.card_badge.remove_css_class("badge-warning")
             self.card_badge.remove_css_class("badge-danger")
@@ -191,9 +194,13 @@ class DashboardView(Gtk.Box):
         # Update Cardholder Details
         prim_cert = card_stat.primary_certificate
         if card_stat.card_present and prim_cert:
-            self.holder_row.set_subtitle(prim_cert.holder_name or "DoW Cardholder")
-            self.edipi_row.set_subtitle(prim_cert.edipi or "Verified on Card")
-            self.cert_status_row.set_subtitle(f"{prim_cert.status_text} (Issuer: {prim_cert.issuer_cn})")
+            h_name = GLib.markup_escape_text(prim_cert.holder_name or "DoW Cardholder")
+            e_id = GLib.markup_escape_text(prim_cert.edipi or "Verified on Card")
+            s_text = GLib.markup_escape_text(prim_cert.status_text or "Active")
+            i_cn = GLib.markup_escape_text(prim_cert.issuer_cn or "DoW CA")
+            self.holder_row.set_subtitle(h_name)
+            self.edipi_row.set_subtitle(e_id)
+            self.cert_status_row.set_subtitle(f"{s_text} (Issuer: {i_cn})")
         else:
             self.holder_row.set_subtitle("Insert CAC into reader to read identity")
             self.edipi_row.set_subtitle("—")

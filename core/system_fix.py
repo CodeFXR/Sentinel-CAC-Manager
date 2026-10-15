@@ -189,8 +189,11 @@ def install_desktop_integration(
 
         # 2. Executable launcher in ~/.local/bin/sentinel-cac-manager
         launcher_path = os.path.join(bin_dir, "sentinel-cac-manager")
+        script_target = os.path.join(project_dir, "sentinel_cac_manager.py")
+        import shlex
+        quoted_script = shlex.quote(script_target)
         launcher_script = f"""#!/usr/bin/env bash
-exec python3 "{project_dir}/sentinel_cac_manager.py" "$@"
+exec python3 {quoted_script} "$@"
 """
         with open(launcher_path, "w") as f:
             f.write(launcher_script)
@@ -215,11 +218,12 @@ exec python3 "{project_dir}/sentinel_cac_manager.py" "$@"
         if not os.path.isfile(icon_path):
             icon_path = os.path.join(project_dir, "sentinel_icon.png")
 
+        # FreeDesktop spec requires argument quoting if path contains whitespace
         desktop_content = f"""[Desktop Entry]
 Name=Sentinel CAC Manager
 GenericName=DoW Smart Card Manager
 Comment=Automate DoW CAC Middleware, Certificates, and Browser Authentication
-Exec=python3 {project_dir}/sentinel_cac_manager.py --gui
+Exec=python3 "{script_target}" --gui
 Path={project_dir}
 Icon={icon_path}
 Terminal=false

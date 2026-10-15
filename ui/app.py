@@ -112,7 +112,7 @@ class MainWindow(Adw.ApplicationWindow):
         refresh_btn.connect("clicked", lambda b: self.refresh_all_status())
         header.pack_end(refresh_btn)
 
-        test_btn = Gtk.Button(icon_name="globe-symbolic")
+        test_btn = Gtk.Button(icon_name="web-browser-symbolic")
         test_btn.set_tooltip_text("Test Browser Authentication (MyPay)")
         test_btn.connect("clicked", lambda b: self.diagnostics_view.open_url("https://mypay.dfas.mil"))
         header.pack_end(test_btn)
@@ -171,11 +171,13 @@ class MainWindow(Adw.ApplicationWindow):
 
         def _worker():
             c_stat = scan_smartcard()
-            GLib.idle_add(self._apply_status_update, c_stat)
+            b_stat = check_browsers_status()
+            certs_installed = is_system_trust_installed(self.platform)
+            GLib.idle_add(self._apply_status_update, c_stat, b_stat, certs_installed)
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _apply_status_update(self, c_stat: SmartCardStatus):
+    def _apply_status_update(self, c_stat: SmartCardStatus, b_stat, certs_installed: bool):
         self._is_polling = False
         prev_present = self.last_card_present
         self.card_status = c_stat
@@ -191,8 +193,6 @@ class MainWindow(Adw.ApplicationWindow):
             self.append_log("[HARDWARE] Smart card removed from reader")
 
         # Check overall system readiness
-        b_stat = check_browsers_status()
-        certs_installed = is_system_trust_installed(self.platform)
         system_ready = bool(
             c_stat.service_active
             and certs_installed

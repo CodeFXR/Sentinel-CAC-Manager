@@ -15,13 +15,9 @@
   </p>
 
   <p>
+    <img src="https://img.shields.io/badge/Version-v1.1.0-blue.svg?style=flat-square" alt="Version" />
     <img src="https://img.shields.io/badge/Fedora-Tested-294172?style=flat-square&logo=fedora&logoColor=white" alt="Fedora" />
     <img src="https://img.shields.io/badge/Ubuntu-Tested-E95420?style=flat-square&logo=ubuntu&logoColor=white" alt="Ubuntu" />
-    <img src="https://img.shields.io/badge/Debian-Tested-A81D33?style=flat-square&logo=debian&logoColor=white" alt="Debian" />
-    <img src="https://img.shields.io/badge/Linux_Mint-Tested-87CF3E?style=flat-square&logo=linuxmint&logoColor=white" alt="Linux Mint" />
-    <img src="https://img.shields.io/badge/Pop!_OS-Tested-48B9C7?style=flat-square&logo=popos&logoColor=white" alt="Pop!_OS" />
-    <img src="https://img.shields.io/badge/RHEL-Tested-EE0000?style=flat-square&logo=redhat&logoColor=white" alt="RHEL" />
-    <img src="https://img.shields.io/badge/Zorin_OS-Tested-0CC1EC?style=flat-square&logo=zorin&logoColor=white" alt="Zorin OS" />
   </p>
 </div>
 

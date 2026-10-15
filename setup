@@ -9,8 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${HOME}/.local/share/sentinel_cac_manager"
 REPO_URL="https://github.com/CodeFXR/Sentinel-CAC-Manager/archive/refs/heads/main.tar.gz"
 
-# 1. If installer.py exists locally, run it
-if [ -f "${SCRIPT_DIR}/installer.py" ]; then
+# 1. If running inside a verified local checkout, run installer.py directly
+if [ -f "${SCRIPT_DIR}/installer.py" ] && [ -f "${SCRIPT_DIR}/sentinel_cac_manager.py" ] && [ -d "${SCRIPT_DIR}/core" ]; then
     exec python3 "${SCRIPT_DIR}/installer.py" "$@"
 fi
 
