@@ -41,36 +41,26 @@ The installer automatically detects your Linux distribution, checks for missing 
 
 1. Download **Sentinel-CAC-Manager.tar.gz** from the [GitHub Releases](https://github.com/CodeFXR/Sentinel-CAC-Manager/releases) page.
 2. Right-click the downloaded archive in your **Downloads** folder and select **Extract Here**.
-3. Open the extracted `Sentinel-CAC-Manager` folder and launch the installer based on your desktop environment:
-
-- **Linux Mint (Cinnamon, MATE, XFCE):**
-  - Double-click **Install Sentinel CAC Manager** (or right-click `install` and select **Run as a Program**).
-  - When prompted, enter your administrator password in the terminal window to install system dependencies.
-  - The graphical setup wizard will open automatically once package setup completes.
-
-- **GNOME (Ubuntu, Fedora Workstation):**
-  - **Terminal Method (Fastest):** Inside the extracted folder, right-click any blank space, select **Open in Terminal**, and run:
-    ```bash
-    ./install --gui
-    ```
-  - **Desktop Launcher Method:** Move the **Install Sentinel CAC Manager** file to your **Desktop**, right-click it, select **Allow Launching**, and double-click to start.
-  - **File Manager Method:** Right-click the `install` script and select **Run as a Program**.
-
-- **KDE Plasma (Kubuntu, Fedora KDE):**
-  - Double-click **Install Sentinel CAC Manager**, click **Execute**, and enter your administrator password when prompted.
+3. Open the extracted `Sentinel-CAC-Manager` folder and run the installer:
+   - **Terminal:** Right-click inside the extracted folder, select **Open in Terminal**, and run:
+     ```bash
+     ./install
+     ```
+   - **File Manager:** Double-click `install` or right-click `install` and select **Run as a Program**.
+4. When prompted, enter your administrator password (`sudo` or Polkit dialog) to verify and install system packages. The graphical setup wizard will open automatically.
 
 ### Option 2: Automated Terminal One-Liner
 
-Run the automated installer one-liner:
+To launch the graphical setup wizard directly from the terminal:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/CodeFXR/Sentinel-CAC-Manager/main/install | bash
 ```
 
-To launch the graphical setup wizard directly from the terminal:
+For unattended command-line installation (headless or server environments):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CodeFXR/Sentinel-CAC-Manager/main/install | bash -s -- --gui
+curl -fsSL https://raw.githubusercontent.com/CodeFXR/Sentinel-CAC-Manager/main/install | bash -s -- --cli
 ```
 
 The setup wizard inspects the host distribution, installs required system components and certificates, configures browser profiles, and adds Sentinel CAC Manager to your application menu.

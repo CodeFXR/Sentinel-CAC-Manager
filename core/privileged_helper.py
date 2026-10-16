@@ -11,7 +11,37 @@ import subprocess
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CERTS_DIR = os.path.join(SCRIPT_DIR, "certificates")
+
+
+def get_certs_dir(override: str = None) -> str:
+    """Discover certificates directory across system, local, and user installs."""
+    if override and os.path.isdir(override) and os.path.isdir(os.path.join(override, "all_cas")):
+        return override
+
+    candidates = [
+        "/usr/share/sentinel/certificates",
+        "/usr/libexec/sentinel/certificates",
+        os.path.join(SCRIPT_DIR, "certificates"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "certificates"),
+    ]
+
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        try:
+            import pwd
+            u_home = pwd.getpwnam(sudo_user).pw_dir
+            candidates.append(os.path.join(u_home, ".local", "share", "sentinel_cac_manager", "certificates"))
+        except Exception:
+            pass
+
+    for c in candidates:
+        if os.path.isdir(c) and os.path.isdir(os.path.join(c, "all_cas")):
+            return c
+
+    return os.path.join(SCRIPT_DIR, "certificates")
+
+
+CERTS_DIR = get_certs_dir()
 ALL_CAS_DIR = os.path.join(CERTS_DIR, "all_cas")
 FULL_CHAIN_PEM = os.path.join(CERTS_DIR, "DoW_Full_Chain.pem")
 FULL_CHAIN_CRT = os.path.join(CERTS_DIR, "DoW_Full_Chain.crt")
@@ -277,6 +307,7 @@ def main():
     parser = argparse.ArgumentParser(description="Sentinel Root Helper")
     parser.add_argument("--family", default="debian", help="distro family (debian/fedora)")
     parser.add_argument("--module", default="/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so", help="path to opensc module")
+    parser.add_argument("--certs-dir", default=None, help="path to source certificates directory")
     parser.add_argument("--all", action="store_true", help="run all root setup steps")
     parser.add_argument("--packages", action="store_true", help="install system packages")
     parser.add_argument("--certs", action="store_true", help="install system certs only")
@@ -289,6 +320,13 @@ def main():
     if os.geteuid() != 0:
         log("ERROR: This helper must be run as root (via pkexec or sudo).")
         return 1
+
+    global CERTS_DIR, ALL_CAS_DIR, FULL_CHAIN_PEM, FULL_CHAIN_CRT
+    if args.certs_dir:
+        CERTS_DIR = get_certs_dir(args.certs_dir)
+        ALL_CAS_DIR = os.path.join(CERTS_DIR, "all_cas")
+        FULL_CHAIN_PEM = os.path.join(CERTS_DIR, "DoW_Full_Chain.pem")
+        FULL_CHAIN_CRT = os.path.join(CERTS_DIR, "DoW_Full_Chain.crt")
 
     # Keep protected system helper in sync
     ensure_system_helper()

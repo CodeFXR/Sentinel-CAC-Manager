@@ -50,6 +50,9 @@ class MainWindow(Adw.ApplicationWindow):
         self.setup_ui()
         self.load_css()
 
+        # Ensure application styling aligns with the dark cybersecurity theme
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.PREFER_DARK)
+
         # Initial status refresh
         self.refresh_all_status()
 
@@ -198,12 +201,21 @@ class MainWindow(Adw.ApplicationWindow):
             self.show_toast("Smart Card Removed")
             self.append_log("[HARDWARE] Smart card removed from reader")
 
-        # Check overall system readiness
+        # Check overall system readiness:
+        # Browsers are ready if system enterprise policy is active,
+        # or profile is configured, or Chrome NSS DB is configured,
+        # or neither browser is installed on system.
+        browsers_ready = bool(
+            b_stat.firefox_policy_active
+            or (b_stat.firefox_prompt_configured and b_stat.firefox_module_loaded)
+            or b_stat.chrome_module_loaded
+            or (not b_stat.firefox_installed and not b_stat.chrome_installed)
+        )
+
         system_ready = bool(
             c_stat.service_active
             and certs_installed
-            and b_stat.firefox_prompt_configured
-            and b_stat.firefox_module_loaded
+            and browsers_ready
         )
 
         # Update child views

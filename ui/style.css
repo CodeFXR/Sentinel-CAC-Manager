@@ -19,6 +19,40 @@ window {
 headerbar {
     background: @sentinel_surface;
     border-bottom: 1px solid rgba(56, 189, 248, 0.15);
+    color: #f8fafc;
+}
+
+headerbar label {
+    color: #f8fafc;
+}
+
+headerbar button {
+    color: #f8fafc;
+}
+
+/* ViewSwitcher Navigation Tabs */
+viewswitcher button {
+    color: #94a3b8;
+    font-weight: 600;
+}
+
+viewswitcher button:hover {
+    color: #f8fafc;
+}
+
+viewswitcher button:checked {
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.15);
+    border-radius: 8px;
+}
+
+viewswitcher button label {
+    color: inherit;
+    font-weight: 600;
+}
+
+viewswitcher button image {
+    color: inherit;
 }
 
 .header-icon {

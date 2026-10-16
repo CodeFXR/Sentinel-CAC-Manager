@@ -141,11 +141,14 @@ def run_full_setup(
 
     # Step 2: Elevated System Configuration
     _progress(0.30, "Applying elevated system settings (CAs, daemon, reader fix)...")
+    certs_dir = os.path.join(SCRIPT_DIR, "certificates")
     helper_args = [
         "--all",
         "--family", plat.family,
         "--module", module_path,
     ]
+    if os.path.isdir(certs_dir):
+        helper_args.extend(["--certs-dir", certs_dir])
     ok, helper_msg = run_privileged_helper(helper_args, log_fn=_log, timeout=60)
     if not ok:
         result["message"] = f"Elevated setup failed: {helper_msg}"
