@@ -17,7 +17,7 @@
   </p>
 
   <p>
-    <img src="https://img.shields.io/badge/Version-v1.2.1-blue.svg?style=flat-square" alt="Version" />
+    <img src="https://img.shields.io/badge/Version-v1.2.2-blue.svg?style=flat-square" alt="Version" />
     <img src="https://img.shields.io/badge/Fedora-Tested-294172?style=flat-square&logo=fedora&logoColor=white" alt="Fedora" />
     <img src="https://img.shields.io/badge/Ubuntu-Tested-E95420?style=flat-square&logo=ubuntu&logoColor=white" alt="Ubuntu" />
   </p>

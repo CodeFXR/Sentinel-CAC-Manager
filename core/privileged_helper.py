@@ -6,17 +6,31 @@ under a single pkexec / sudo invocation so the user only authenticates ONCE.
 
 import argparse
 import os
+import re
 import shutil
+import stat
 import subprocess
 import sys
+from typing import Optional
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def get_certs_dir(override: str = None) -> str:
     """Discover certificates directory across system, local, and user installs."""
+    # Priority 1: Protected root-controlled installation store (mode 0755 root:root)
+    system_store = "/usr/share/sentinel/certificates"
+    if os.path.isdir(system_store) and os.path.isdir(os.path.join(system_store, "all_cas")):
+        try:
+            if os.stat(system_store).st_uid == 0:
+                return system_store
+        except Exception:
+            pass
+
+    # Priority 2: Validated override if provided
     if override and os.path.isdir(override) and os.path.isdir(os.path.join(override, "all_cas")):
-        return override
+        if not any(c in override for c in ("\r", "\n", "\0")):
+            return os.path.abspath(override)
 
     candidates = [
         "/usr/share/sentinel/certificates",
@@ -155,13 +169,131 @@ def fix_opensc_hang():
         log(f"Failed to update {target_conf}: {e}")
 
 
-def _write_secure_cert(src_path: str, dst_path: str):
-    """Write certificate bytes with explicit non-executable mode 0644."""
-    with open(src_path, "rb") as f_in:
-        data = f_in.read()
-    with open(dst_path, "wb") as f_out:
-        f_out.write(data)
-    os.chmod(dst_path, 0o644)
+SAFE_CERT_FILENAME = re.compile(r"^[a-zA-Z0-9_.-]+\.(crt|pem)$")
+PEM_CERT_PATTERN = re.compile(rb"-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----")
+
+
+def _parse_and_reserialize_single_cert(pem_bytes: bytes) -> Optional[bytes]:
+    """Validate a single PEM certificate block and return canonical reserialized PEM bytes."""
+    # 1. Try python cryptography library if available
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import serialization
+        cert = x509.load_pem_x509_certificate(pem_bytes)
+        if cert.subject and cert.issuer:
+            return cert.public_bytes(serialization.Encoding.PEM).strip()
+    except Exception:
+        pass
+
+    # 2. Try OpenSSL CLI (piped directly into stdin, zero temp files)
+    try:
+        proc = subprocess.run(
+            ["openssl", "x509"],
+            input=pem_bytes,
+            capture_output=True,
+            timeout=5,
+        )
+        if proc.returncode == 0 and b"-----BEGIN CERTIFICATE-----" in proc.stdout:
+            return proc.stdout.strip()
+    except Exception:
+        pass
+
+    return None
+
+
+def _validate_and_reserialize_cert(data: bytes, fname: str) -> Optional[bytes]:
+    """Validate X.509 certificate data and reserialize into canonical PEM format."""
+    pem_blocks = PEM_CERT_PATTERN.findall(data)
+    if not pem_blocks:
+        log(f"Security: Rejected {fname}: contains no valid PEM certificate blocks")
+        return None
+
+    reserialized_certs = []
+    for idx, block in enumerate(pem_blocks):
+        validated_pem = _parse_and_reserialize_single_cert(block)
+        if not validated_pem:
+            log(f"Security: Rejected {fname}: certificate block {idx+1} failed X.509 ASN.1 validation")
+            return None
+        reserialized_certs.append(validated_pem)
+
+    return b"\n".join(reserialized_certs) + b"\n"
+
+
+def _read_and_validate_cert(src_path: str, expected_dir: str) -> Optional[bytes]:
+    """Securely read and validate certificate bytes without following symlinks (CWE-59).
+
+    Enforces source confinement, rejects symlinks, verifies regular file status,
+    validates X.509 ASN.1 structure, and returns canonical reserialized PEM bytes.
+    """
+    fname = os.path.basename(src_path)
+    if not SAFE_CERT_FILENAME.match(fname):
+        log(f"Security: Rejected certificate filename '{fname}' (invalid characters or extension)")
+        return None
+
+    # Check for symlink before opening
+    if os.path.islink(src_path):
+        log(f"Security: Rejected symlink in certificates directory: {src_path} (CWE-59)")
+        return None
+
+    # Open with O_NOFOLLOW to atomically eliminate symlink races (TOCTOU)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(src_path, flags)
+    except OSError as e:
+        log(f"Security: Could not securely open {src_path} without following links: {e}")
+        return None
+
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            log(f"Security: Rejected non-regular file: {src_path}")
+            return None
+
+        # Sanity check size: between 64 bytes and 1 MB
+        if st.st_size < 64 or st.st_size > 1048576:
+            log(f"Security: Rejected cert {src_path} with unexpected size ({st.st_size} bytes)")
+            return None
+
+        # Enforce source directory confinement using /proc/self/fd on Linux
+        try:
+            real_src = os.path.realpath(f"/proc/self/fd/{fd}")
+            real_expected = os.path.realpath(expected_dir)
+            if os.path.commonpath([real_expected, real_src]) != real_expected:
+                log(f"Security: Confinement violation: {src_path} resolved outside {expected_dir}")
+                return None
+        except Exception as e:
+            log(f"Security: Confinement check error: {e}")
+            return None
+
+        raw_data = os.read(fd, st.st_size)
+    finally:
+        os.close(fd)
+
+    return _validate_and_reserialize_cert(raw_data, fname)
+
+
+def _write_secure_cert(src_path: str, dst_path: str, expected_dir: str) -> bool:
+    """Read, validate, and write certificate bytes with explicit non-executable mode 0644."""
+    data = _read_and_validate_cert(src_path, expected_dir)
+    if not data:
+        log(f"Skipping unvalidated or insecure certificate source: {src_path}")
+        return False
+
+    temp_dst = f"{dst_path}.tmp.{os.getpid()}"
+    try:
+        with open(temp_dst, "wb") as f_out:
+            f_out.write(data)
+        os.chmod(temp_dst, 0o644)
+        os.replace(temp_dst, dst_path)
+        return True
+    except Exception as e:
+        log(f"Error writing certificate to {dst_path}: {e}")
+        if os.path.exists(temp_dst):
+            try:
+                os.remove(temp_dst)
+            except Exception:
+                pass
+        return False
 
 
 def install_system_certificates(distro_family: str):
@@ -171,16 +303,16 @@ def install_system_certificates(distro_family: str):
         os.makedirs(target_dir, exist_ok=True)
         count = 0
         if os.path.isdir(ALL_CAS_DIR):
-            for fname in os.listdir(ALL_CAS_DIR):
+            for fname in sorted(os.listdir(ALL_CAS_DIR)):
                 if fname.endswith(".crt"):
                     src = os.path.join(ALL_CAS_DIR, fname)
                     dst = os.path.join(target_dir, fname)
-                    _write_secure_cert(src, dst)
-                    count += 1
+                    if _write_secure_cert(src, dst, ALL_CAS_DIR):
+                        count += 1
         # Also deploy the full chain CRT bundle for applications that reference it
         if os.path.isfile(FULL_CHAIN_CRT):
-            _write_secure_cert(FULL_CHAIN_CRT, os.path.join(target_dir, "DoW_Full_Chain.crt"))
-            count += 1
+            if _write_secure_cert(FULL_CHAIN_CRT, os.path.join(target_dir, "DoW_Full_Chain.crt"), CERTS_DIR):
+                count += 1
         log(f"Copied {count} CA certificates to {target_dir}")
         res = subprocess.run(["update-ca-certificates", "--fresh"], capture_output=True, text=True)
         log(f"Ran update-ca-certificates: {res.stdout.strip()}")
@@ -188,8 +320,8 @@ def install_system_certificates(distro_family: str):
         target_dir = "/etc/pki/ca-trust/source/anchors"
         os.makedirs(target_dir, exist_ok=True)
         dst = os.path.join(target_dir, "DoW_Full_Chain.pem")
-        _write_secure_cert(FULL_CHAIN_PEM, dst)
-        log(f"Installed full trust bundle into {dst}")
+        if _write_secure_cert(FULL_CHAIN_PEM, dst, CERTS_DIR):
+            log(f"Installed full trust bundle into {dst}")
         res = subprocess.run(["update-ca-trust"], capture_output=True, text=True)
         log("Ran update-ca-trust successfully.")
     else:
@@ -197,7 +329,7 @@ def install_system_certificates(distro_family: str):
         target_dir = "/usr/local/share/ca-certificates/dow"
         os.makedirs(target_dir, exist_ok=True)
         if os.path.isfile(FULL_CHAIN_CRT):
-            _write_secure_cert(FULL_CHAIN_CRT, os.path.join(target_dir, "DoW_Full_Chain.crt"))
+            _write_secure_cert(FULL_CHAIN_CRT, os.path.join(target_dir, "DoW_Full_Chain.crt"), CERTS_DIR)
         subprocess.run(["update-ca-certificates"], capture_output=True)
         log("Updated system ca certificates.")
 

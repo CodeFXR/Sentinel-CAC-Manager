@@ -44,6 +44,9 @@ class InstallerWindow(Adw.Window):
         # Load style sheet
         self._load_styles()
 
+        # Ensure installer styling aligns with the dark cybersecurity theme
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.PREFER_DARK)
+
         # Build UI layout
         self._build_ui()
 
@@ -451,6 +454,7 @@ class InstallerWindow(Adw.Window):
         bottom_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
 
         self.launch_check = Gtk.CheckButton(label="Launch Sentinel CAC Manager now")
+        self.launch_check.add_css_class("launch-checkbox")
         self.launch_check.set_active(True)
         self.launch_check.set_hexpand(True)
         bottom_box.append(self.launch_check)
@@ -724,6 +728,7 @@ class InstallerApplication(Adw.Application):
         )
 
     def do_activate(self):
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.PREFER_DARK)
         win = self.props.active_window
         if not win:
             win = InstallerWindow(self)

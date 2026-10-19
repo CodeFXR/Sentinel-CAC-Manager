@@ -141,14 +141,17 @@ def run_full_setup(
 
     # Step 2: Elevated System Configuration
     _progress(0.30, "Applying elevated system settings (CAs, daemon, reader fix)...")
+    system_certs_dir = "/usr/share/sentinel/certificates"
     certs_dir = os.path.join(SCRIPT_DIR, "certificates")
     helper_args = [
         "--all",
         "--family", plat.family,
         "--module", module_path,
     ]
-    if os.path.isdir(certs_dir):
-        helper_args.extend(["--certs-dir", certs_dir])
+    # Prefer protected system bundle if installed; otherwise pass verified local certs_dir
+    if not (os.path.isdir(system_certs_dir) and os.path.isdir(os.path.join(system_certs_dir, "all_cas"))):
+        if os.path.isdir(certs_dir):
+            helper_args.extend(["--certs-dir", certs_dir])
     ok, helper_msg = run_privileged_helper(helper_args, log_fn=_log, timeout=60)
     if not ok:
         result["message"] = f"Elevated setup failed: {helper_msg}"
@@ -185,15 +188,46 @@ def run_full_setup(
 def install_desktop_integration(
     project_dir: Optional[str] = None,
     log_fn: Optional[Callable[[str], None]] = None,
+    home_dir: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """Install application menu shortcut and CLI commands in ~/.local."""
     if not project_dir:
         project_dir = SCRIPT_DIR
 
-    home = os.path.expanduser("~")
+    home = home_dir or os.path.expanduser("~")
     bin_dir = os.path.join(home, ".local", "bin")
     app_dir = os.path.join(home, ".local", "share", "applications")
     icon_dir = os.path.join(home, ".local", "share", "icons", "hicolor", "256x256", "apps")
+    script_target = os.path.join(project_dir, "sentinel_cac_manager.py")
+    launcher_path = os.path.join(bin_dir, "sentinel-cac-manager")
+    desktop_file = os.path.join(app_dir, "sentinel_cac_manager.desktop")
+
+    # Step 1: Strict upfront validation of all supplied paths BEFORE creating or changing files (CWE-74)
+    for p_name, p_val in (
+        ("project_dir", project_dir),
+        ("home", home),
+        ("bin_dir", bin_dir),
+        ("app_dir", app_dir),
+        ("icon_dir", icon_dir),
+        ("script_target", script_target),
+    ):
+        if any(c in p_val for c in ("\r", "\n", "\0")):
+            err = f"Failed to install desktop integration: Invalid {p_name}: path must not contain newline characters (CWE-74)"
+            if log_fn:
+                log_fn(f"[ERROR] {err}")
+            return False, err
+
+    if not os.path.isdir(project_dir):
+        err = f"Failed to install desktop integration: project_dir '{project_dir}' is not an existing directory"
+        if log_fn:
+            log_fn(f"[ERROR] {err}")
+        return False, err
+
+    if not os.path.isfile(script_target):
+        err = f"Failed to install desktop integration: Entrypoint '{script_target}' not found"
+        if log_fn:
+            log_fn(f"[ERROR] {err}")
+        return False, err
 
     try:
         os.makedirs(bin_dir, exist_ok=True)
@@ -209,42 +243,11 @@ def install_desktop_integration(
                     log_fn(f"Installed application icon to {icon_dir}/sentinel_cac_manager.png")
                 break
 
-        # 2. Executable launcher in ~/.local/bin/sentinel-cac-manager
-        launcher_path = os.path.join(bin_dir, "sentinel-cac-manager")
-        script_target = os.path.join(project_dir, "sentinel_cac_manager.py")
-        import shlex
-        quoted_script = shlex.quote(script_target)
-        launcher_script = f"""#!/usr/bin/env bash
-exec python3 {quoted_script} "$@"
-"""
-        with open(launcher_path, "w") as f:
-            f.write(launcher_script)
-        os.chmod(launcher_path, 0o755)
-
-        # Symlinks for convenience: sentinel and sentinel-v2
-        for alias in ["sentinel", "sentinel-v2", "sentinel2"]:
-            try:
-                alias_path = os.path.join(bin_dir, alias)
-                if os.path.islink(alias_path) or os.path.exists(alias_path):
-                    os.remove(alias_path)
-                os.symlink(launcher_path, alias_path)
-            except Exception:
-                pass
-
-        if log_fn:
-            log_fn(f"Created command launcher at {launcher_path}")
-
-        # 3. Desktop entry
-        desktop_file = os.path.join(app_dir, "sentinel_cac_manager.desktop")
-        icon_path = os.path.join(project_dir, "sentinel_cac_manager.png")
+        icon_path = os.path.join(icon_dir, "sentinel_cac_manager.png")
         if not os.path.isfile(icon_path):
-            icon_path = os.path.join(project_dir, "sentinel_icon.png")
+            icon_path = os.path.join(project_dir, "sentinel_cac_manager.png")
 
-        # Validate that path values contain no newline characters to prevent desktop entry injection (CWE-74)
-        for p_name, p_val in (("script_target", script_target), ("project_dir", project_dir), ("icon_path", icon_path)):
-            if any(c in p_val for c in ("\r", "\n")):
-                raise ValueError(f"Invalid {p_name}: path must not contain newline characters (CWE-74)")
-
+        # 2. Desktop entry (staged and written atomically)
         def escape_desktop_value(val: str) -> str:
             """Escape backslashes for standard desktop entry line-oriented string fields (CWE-74)."""
             return val.replace("\\", "\\\\")
@@ -258,7 +261,6 @@ exec python3 {quoted_script} "$@"
         escaped_project_dir = escape_desktop_value(project_dir)
         escaped_icon_path = escape_desktop_value(icon_path)
 
-        # FreeDesktop spec requires argument quoting if path contains whitespace
         desktop_content = f"""[Desktop Entry]
 Name=Sentinel CAC Manager
 GenericName=DoW Smart Card Manager
@@ -273,9 +275,12 @@ Keywords=CAC;PIV;DoW;SmartCard;Military;Security;Authentication;
 StartupNotify=true
 StartupWMClass=mil.dow.sentinel_cac_manager
 """
-        with open(desktop_file, "w") as f:
+        desktop_tmp = f"{desktop_file}.tmp.{os.getpid()}"
+        with open(desktop_tmp, "w") as f:
             f.write(desktop_content)
-        # Remove legacy desktop file if present
+        os.chmod(desktop_tmp, 0o644)
+        os.replace(desktop_tmp, desktop_file)
+
         legacy_desktop = os.path.join(app_dir, "sentinel_v2.desktop")
         if os.path.isfile(legacy_desktop):
             try:
@@ -286,13 +291,40 @@ StartupWMClass=mil.dow.sentinel_cac_manager
         if shutil.which("update-desktop-database"):
             subprocess.run(["update-desktop-database", app_dir], capture_output=True)
 
+        # 3. Executable launcher in ~/.local/bin/sentinel-cac-manager (staged atomically)
+        import shlex
+        quoted_script = shlex.quote(script_target)
+        launcher_script = f"""#!/usr/bin/env bash
+exec python3 {quoted_script} "$@"
+"""
+        launcher_tmp = f"{launcher_path}.tmp.{os.getpid()}"
+        with open(launcher_tmp, "w") as f:
+            f.write(launcher_script)
+        os.chmod(launcher_tmp, 0o755)
+        os.replace(launcher_tmp, launcher_path)
+
+        # Symlinks for convenience: sentinel and sentinel-v2
+        for alias in ["sentinel", "sentinel-v2", "sentinel2"]:
+            try:
+                alias_path = os.path.join(bin_dir, alias)
+                if os.path.islink(alias_path) or os.path.exists(alias_path):
+                    os.remove(alias_path)
+                os.symlink(launcher_path, alias_path)
+            except Exception:
+                pass
+
+        if log_fn:
+            log_fn(f"Created command launcher at {launcher_path}")
+
         # 4. Optional Desktop folder shortcut
         desktop_dir = os.path.join(home, "Desktop")
         if os.path.isdir(desktop_dir):
             try:
                 user_desktop_file = os.path.join(desktop_dir, "sentinel_cac_manager.desktop")
-                shutil.copy2(desktop_file, user_desktop_file)
-                os.chmod(user_desktop_file, 0o755)
+                user_desktop_tmp = f"{user_desktop_file}.tmp.{os.getpid()}"
+                shutil.copy2(desktop_file, user_desktop_tmp)
+                os.chmod(user_desktop_tmp, 0o755)
+                os.replace(user_desktop_tmp, user_desktop_file)
                 legacy_user_desktop = os.path.join(desktop_dir, "sentinel_v2.desktop")
                 if os.path.isfile(legacy_user_desktop):
                     os.remove(legacy_user_desktop)

@@ -27,6 +27,12 @@ if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
     fi
 fi
 
+# Upfront path validation to prevent injection attacks (CWE-74)
+if [[ "${TARGET_HOME}" =~ [$'\r\n'] ]] || [[ "${SCRIPT_DIR:-}" =~ [$'\r\n'] ]] || [[ "${INSTALL_DIR}" =~ [$'\r\n'] ]]; then
+    echo "[-] Error: installation directory path contains carriage return or newline characters." >&2
+    exit 1
+fi
+
 # 2. Standalone web bootstrapper mode: fetch repo into ~/.local/share/sentinel_cac_manager
 if [ "$IS_LOCAL" -eq 0 ]; then
     echo "[*] Initializing Sentinel CAC Manager installer..."
@@ -334,11 +340,16 @@ if command -v cargo >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/Cargo.toml" ]; then
     (cd "${SCRIPT_DIR}" && cargo build --release -q) || echo "[!] Rust build skipped; falling back to pure-Python runtime."
 fi
 
-# 9. Create local bin and application directories
+# 9. Validate paths and create local bin and application directories (CWE-74)
 BIN_DIR="${TARGET_HOME}/.local/bin"
 APP_DIR="${TARGET_HOME}/.local/share/applications"
 ICON_DIR="${TARGET_HOME}/.local/share/icons/hicolor/256x256/apps"
 ICON_SRC="${SCRIPT_DIR}/sentinel_cac_manager.png"
+
+if [[ "${SCRIPT_DIR}" =~ [$'\r\n'] ]] || [[ "${TARGET_HOME}" =~ [$'\r\n'] ]] || [[ "${ICON_DIR}" =~ [$'\r\n'] ]] || [[ "${BIN_DIR}" =~ [$'\r\n'] ]]; then
+    echo "[-] Error: installation directory path contains carriage return or newline characters." >&2
+    exit 1
+fi
 
 mkdir -p "${BIN_DIR}" "${APP_DIR}" "${ICON_DIR}"
 
@@ -358,11 +369,7 @@ echo "    - ${BIN_DIR}/sentinel-cac-manager"
 echo "    - ${BIN_DIR}/sentinel"
 echo "    - ${BIN_DIR}/sentinel-v2"
 
-# 12. Install desktop launcher (FreeDesktop argument escaping and newline rejection applied)
-if [[ "${SCRIPT_DIR}" =~ [$'\r\n'] ]] || [[ "${ICON_DIR}" =~ [$'\r\n'] ]] || [[ "${BIN_DIR}" =~ [$'\r\n'] ]]; then
-    echo "[-] Error: installation directory path contains carriage return or newline characters." >&2
-    exit 1
-fi
+# 12. Install desktop launcher (FreeDesktop argument escaping applied)
 
 escape_desktop_exec_arg() {
     local str="$1"

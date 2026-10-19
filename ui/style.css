@@ -224,3 +224,32 @@ viewswitcher button image {
     border-radius: 8px;
     padding: 12px;
 }
+
+/* CheckButton & Launcher Checkbox Styling (Guarantees crisp, high-contrast light text across all OS themes) */
+checkbutton {
+    color: #f8fafc;
+}
+
+checkbutton label {
+    color: #f8fafc;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+checkbutton:hover label {
+    color: #ffffff;
+}
+
+checkbutton:checked label {
+    color: #f8fafc;
+}
+
+.launch-checkbox {
+    color: #f8fafc;
+}
+
+.launch-checkbox label {
+    color: #f8fafc;
+    font-size: 14px;
+    font-weight: 600;
+}
