@@ -27,7 +27,7 @@ ASCII_BANNER = r"""
 
 def print_banner():
     print(ASCII_BANNER.rstrip("\n"))
-    print(f"       DoW CAC Identity and Middleware Automator (v{__version__})\n")
+    print(f"       DoD CAC Identity and Middleware Automator (v{__version__})\n")
 
 
 def cmd_status():
@@ -52,7 +52,7 @@ def cmd_status():
     rust_stat = f"[RUST v{get_rust_version()}]" if is_rust_available() else "[PYTHON FALLBACK]"
     print(f"  Native Core Engine:    {rust_stat}")
     print(f"  PCSC Daemon (pcscd):   {'[ACTIVE]' if card_stat.service_active else '[INACTIVE]'}")
-    print(f"  DoW System Trust:      {'[INSTALLED]' if certs_installed else '[NOT INSTALLED]'}")
+    print(f"  DoD System Trust:      {'[INSTALLED]' if certs_installed else '[NOT INSTALLED]'}")
     print(f"  Firefox Profiles:      {b_stat.firefox_profiles_count} detected")
     print(f"  Firefox Policy:        {'[ACTIVE]' if b_stat.firefox_policy_active else '[NOT CONFIGURED]'}")
     print(f"  Firefox Prompting:     {'[Ask Every Time]' if b_stat.firefox_prompt_configured else '[Select Auto]'}")
@@ -70,7 +70,7 @@ def cmd_status():
         print(f"  Card Type:             {_clean_term(card_stat.card_name, 'Common Access Card')}")
         print(f"  Token Label:           {_clean_term(card_stat.token_label)}")
         print(f"  Cardholder Name:       {_clean_term(card_stat.primary_certificate.holder_name if card_stat.primary_certificate else None)}")
-        print(f"  EDIPI / DoW ID:        {_clean_term(card_stat.primary_certificate.edipi if card_stat.primary_certificate else None)}")
+        print(f"  EDIPI / DoD ID:        {_clean_term(card_stat.primary_certificate.edipi if card_stat.primary_certificate else None)}")
         print(f"  ATR:                   {_clean_term(card_stat.atr, 'N/A')}")
         print(f"  On-Card Certificates:  {len(card_stat.certificates)}")
         for c in card_stat.certificates:
@@ -106,26 +106,26 @@ def cmd_card_info():
 def cmd_setup():
     from core.system_fix import run_full_setup
 
-    print("Initiating Full Automated DoW CAC Setup...")
+    print("Initiating Full Automated DoD CAC Setup...")
     res = run_full_setup(
         progress_callback=lambda frac, msg: print(f"[{int(frac * 100)}%] {msg}"),
         log_callback=lambda msg: print(f"  {msg}"),
     )
     if res["success"]:
-        print("\nSUCCESS: DoW CAC setup completed successfully!")
+        print("\nSUCCESS: DoD CAC setup completed successfully!")
         print("Open Firefox or Chrome and navigate to your .mil portal.")
     else:
         print(f"\nFAILED: {res['message']}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Sentinel CAC Manager - Automated DoW CAC Manager for Linux")
+    parser = argparse.ArgumentParser(description="Sentinel CAC Manager - Automated DoD CAC Manager for Linux")
     parser.add_argument("--version", "-v", action="version", version=f"Sentinel CAC Manager v{__version__}")
     parser.add_argument("--status", "--check", action="store_true", help="display system and card status")
     parser.add_argument("--setup-all", "--automate", action="store_true", help="run full automated setup")
     parser.add_argument("--card-info", action="store_true", help="display details of inserted smart card")
     parser.add_argument("--browsers", action="store_true", help="configure Firefox and Chrome browsers only")
-    parser.add_argument("--certs", action="store_true", help="install DoW certificates only")
+    parser.add_argument("--certs", action="store_true", help="install DoD certificates only")
     parser.add_argument("--reader-fix", action="store_true", help="apply Broadcom reader hang fix only")
     parser.add_argument("--gui", action="store_true", help="launch graphical interface")
     parser.add_argument("--installer", action="store_true", help="launch graphical setup wizard")

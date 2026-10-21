@@ -88,6 +88,57 @@ def _parse_cert_date(raw: str) -> Optional[datetime]:
     return None
 
 
+def format_dod_cardholder_name(cn: str) -> Tuple[str, str]:
+    """Parse DoD CAC Common Name into clean holder name and EDIPI.
+
+    Handles standard formats:
+      LAST.FIRST.M.EDIPI -> First M Last
+      LAST.FIRST.M.CTR.EDIPI -> First M Last
+      LAST.FIRST.M.JR.EDIPI -> First M Last Jr
+      LAST.FIRST.M.JR.CTR.EDIPI -> First M Last Jr
+    """
+    if not cn or "." not in cn:
+        return cn, ""
+
+    parts = [p.strip() for p in cn.split(".") if p.strip()]
+    if not parts:
+        return cn, ""
+
+    edipi = ""
+    if parts[-1].isdigit():
+        edipi = parts.pop()
+
+    component_tokens = {"CTR", "CIV", "MIL", "FN", "NAF", "VOL", "RET", "CONTRACTOR", "AFFILIATE"}
+    gen_suffixes = {"JR", "SR", "II", "III", "IV", "V"}
+
+    filtered_parts = []
+    found_gen = ""
+    for p in parts:
+        p_upper = p.upper()
+        if p_upper in component_tokens:
+            continue
+        if p_upper in gen_suffixes:
+            found_gen = p.title() if p_upper in {"JR", "SR"} else p_upper
+            continue
+        filtered_parts.append(p)
+
+    if not filtered_parts:
+        return cn, edipi
+
+    if len(filtered_parts) >= 2:
+        last = filtered_parts[0].title()
+        if found_gen:
+            last = f"{last} {found_gen}"
+        first_middle = " ".join(p.title() for p in filtered_parts[1:])
+        holder_name = f"{first_middle} {last}"
+    else:
+        holder_name = filtered_parts[0].title()
+        if found_gen:
+            holder_name = f"{holder_name} {found_gen}"
+
+    return holder_name, edipi
+
+
 def _parse_x509_text(out_text: str, cert_id: str, label: str, usage: str) -> CardCertificate:
     subject = ""
     issuer = ""
@@ -130,21 +181,8 @@ def _parse_x509_text(out_text: str, cert_id: str, label: str, usage: str) -> Car
     iss_match = re.search(r"CN\s*=\s*([^\n,]+)", issuer)
     issuer_cn = iss_match.group(1).strip() if iss_match else issuer
 
-    # Extract DoW EDIPI & clean Holder Name
-    holder_name = cn
-    edipi = ""
-    if "." in cn:
-        parts = [p.strip() for p in cn.split(".") if p.strip()]
-        if parts and parts[-1].isdigit():
-            edipi = parts[-1]
-            # DoW CAC standard name formatting: LAST.FIRST.MIDDLE.EDIPI -> FIRST MIDDLE LAST
-            name_parts = parts[:-1]
-            if len(name_parts) >= 2:
-                last = name_parts[0]
-                first_middle = " ".join(name_parts[1:])
-                holder_name = f"{first_middle} {last}".title()
-            else:
-                holder_name = " ".join(name_parts).title()
+    # Extract DoD EDIPI & clean Holder Name
+    holder_name, edipi = format_dod_cardholder_name(cn)
 
     if not edipi:
         # Fallback regex for 10-digit DoD EDIPI anywhere in subject
@@ -179,9 +217,9 @@ def read_card_certificates() -> List[CardCertificate]:
         return certs
 
     known_specs = {
-        "0005": ("CAC ID / PIV Authentication", "DoW Web Logon, PIV Mutual Authentication"),
-        "01": ("CAC ID / PIV Authentication", "DoW Web Logon, PIV Mutual Authentication"),
-        "1": ("CAC ID / PIV Authentication", "DoW Web Logon, PIV Mutual Authentication"),
+        "0005": ("CAC ID / PIV Authentication", "DoD Web Logon, PIV Mutual Authentication"),
+        "01": ("CAC ID / PIV Authentication", "DoD Web Logon, PIV Mutual Authentication"),
+        "1": ("CAC ID / PIV Authentication", "DoD Web Logon, PIV Mutual Authentication"),
         "0002": ("CAC Email Signature", "S/MIME Digital Email Signing"),
         "02": ("CAC Email Signature", "S/MIME Digital Email Signing"),
         "2": ("CAC Email Signature", "S/MIME Digital Email Signing"),
@@ -207,8 +245,8 @@ def read_card_certificates() -> List[CardCertificate]:
     # Fallback to standard probed IDs across cac and piv-II drivers
     if not candidate_ids:
         candidate_ids = [
-            ("0005", "CAC ID / PIV Authentication", "DoW Web Logon, PIV Mutual Authentication"),
-            ("01", "CAC ID / PIV Authentication", "DoW Web Logon, PIV Mutual Authentication"),
+            ("0005", "CAC ID / PIV Authentication", "DoD Web Logon, PIV Mutual Authentication"),
+            ("01", "CAC ID / PIV Authentication", "DoD Web Logon, PIV Mutual Authentication"),
             ("0002", "CAC Email Signature", "S/MIME Digital Email Signing"),
             ("02", "CAC Email Signature", "S/MIME Digital Email Signing"),
             ("0003", "CAC Email Encryption", "S/MIME Key Management and Decryption"),
@@ -280,9 +318,24 @@ def scan_smartcard() -> SmartCardStatus:
     opensc_tool = shutil.which("opensc-tool")
     pkcs11_tool = shutil.which("pkcs11-tool")
 
-    # 1. Detect Readers and Card presence via opensc-tool
-    # Do not gate on 'active' since opensc-tool triggers socket activation on demand
-    if opensc_tool:
+    # 0. Fast-path: Direct PC/SC Lite native inspection without subprocess overhead
+    from core.rust_bridge import query_native_pcsc_rust
+    native_pcsc = query_native_pcsc_rust()
+    native_queried = False
+
+    if native_pcsc and native_pcsc.available:
+        native_queried = True
+        active = native_pcsc.service_running
+        if native_pcsc.readers:
+            reader_name = native_pcsc.primary_reader or native_pcsc.readers[0]
+        card_present = native_pcsc.card_present
+        if native_pcsc.atr:
+            atr = native_pcsc.atr
+            if native_pcsc.is_cac:
+                card_name = "DoD Common Access Card (CAC / PIV)"
+
+    # 1. Fallback: Detect Readers and Card presence via opensc-tool if native PC/SC is not available
+    if not native_queried and opensc_tool:
         try:
             res_list = subprocess.run([opensc_tool, "-l"], capture_output=True, text=True, timeout=3)
             for line in res_list.stdout.splitlines():
@@ -308,6 +361,14 @@ def scan_smartcard() -> SmartCardStatus:
                     card_name = "DoD Common Access Card (CAC / PIV)"
         except Exception as e:
             logger.debug(f"opensc-tool scan failed: {e}")
+    elif native_queried and card_present and not card_name and opensc_tool:
+        try:
+            res_name = subprocess.run([opensc_tool, "-n"], capture_output=True, text=True, timeout=2)
+            name_out = res_name.stdout.strip()
+            if name_out:
+                card_name = name_out.splitlines()[0].strip()
+        except Exception:
+            pass
 
     # 2. Extract Token Label & Serial from pkcs11-tool
     if pkcs11_tool and card_present:
@@ -323,14 +384,22 @@ def scan_smartcard() -> SmartCardStatus:
         except Exception as e:
             logger.debug(f"pkcs11-tool scan failed: {e}")
 
-    # 3. Read Certificates if card is present (using ATR cache to prevent flapping & lock collisions)
+    # 3. Read Certificates if card is present (using ATR + Token Serial cache to prevent flapping & lock collisions)
     if card_present:
-        cache_key = atr or reader_name or "card"
-        if cache_key in _CERT_CACHE and _CERT_CACHE[cache_key]:
+        key_parts = []
+        if atr:
+            key_parts.append(atr)
+        if token_serial:
+            key_parts.append(token_serial)
+        elif token_label:
+            key_parts.append(token_label)
+
+        cache_key = ":".join(key_parts) if key_parts else (f"{reader_name}:unknown" if reader_name else None)
+        if cache_key and cache_key in _CERT_CACHE and _CERT_CACHE[cache_key]:
             certificates = _CERT_CACHE[cache_key]
         else:
             certificates = read_card_certificates()
-            if certificates:
+            if certificates and cache_key:
                 _CERT_CACHE[cache_key] = certificates
     else:
         # Clear cache when reader is empty

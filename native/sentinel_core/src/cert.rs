@@ -100,25 +100,7 @@ pub fn parse_der_or_pem_bytes(
         });
 
     // Extract DoD EDIPI & format Holder Name
-    let mut holder_name = cn.clone();
-    let mut edipi = String::new();
-
-    if cn.contains('.') {
-        let parts: Vec<&str> = cn.split('.').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-        if let Some(last_part) = parts.last() {
-            if last_part.chars().all(|c| c.is_ascii_digit()) && last_part.len() >= 9 {
-                edipi = last_part.to_string();
-                let name_parts = &parts[..parts.len() - 1];
-                if name_parts.len() >= 2 {
-                    let last = name_parts[0];
-                    let first_middle = name_parts[1..].join(" ");
-                    holder_name = title_case(&format!("{} {}", first_middle, last));
-                } else {
-                    holder_name = title_case(&name_parts.join(" "));
-                }
-            }
-        }
-    }
+    let (holder_name, mut edipi) = format_dod_cn(&cn);
 
     if edipi.is_empty() {
         let re_edipi = Regex::new(r"\b(\d{10})\b").unwrap();
@@ -194,4 +176,94 @@ fn title_case(s: &str) -> String {
 
 fn format_asn1_time(time: &ASN1Time) -> String {
     time.to_rfc2822().unwrap_or_else(|_| time.to_string())
+}
+
+/// Parses DoD Common Name into clean holder name and EDIPI, stripping component tokens
+/// (CTR, CIV, MIL) and attaching generational suffixes (Jr, II, III).
+pub fn format_dod_cn(cn: &str) -> (String, String) {
+    let mut holder_name = cn.to_string();
+    let mut edipi = String::new();
+
+    if cn.contains('.') {
+        let mut parts: Vec<&str> = cn.split('.').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        if let Some(last_part) = parts.last() {
+            if last_part.chars().all(|c| c.is_ascii_digit()) && last_part.len() >= 9 {
+                edipi = last_part.to_string();
+                parts.pop();
+
+                let component_tokens = ["CTR", "CIV", "MIL", "FN", "NAF", "VOL", "RET", "CONTRACTOR", "AFFILIATE"];
+                let gen_suffixes = ["JR", "SR", "II", "III", "IV", "V"];
+
+                let mut filtered_parts: Vec<&str> = Vec::new();
+                let mut found_gen = String::new();
+
+                for p in parts {
+                    let p_upper = p.to_ascii_uppercase();
+                    if component_tokens.contains(&p_upper.as_str()) {
+                        continue;
+                    }
+                    if gen_suffixes.contains(&p_upper.as_str()) {
+                        found_gen = if p_upper == "JR" || p_upper == "SR" {
+                            title_case(p)
+                        } else {
+                            p_upper
+                        };
+                        continue;
+                    }
+                    filtered_parts.push(p);
+                }
+
+                if !filtered_parts.is_empty() {
+                    if filtered_parts.len() >= 2 {
+                        let mut last = title_case(filtered_parts[0]);
+                        if !found_gen.is_empty() {
+                            last = format!("{} {}", last, found_gen);
+                        }
+                        let first_middle: Vec<String> = filtered_parts[1..].iter().map(|p| title_case(p)).collect();
+                        holder_name = format!("{} {}", first_middle.join(" "), last);
+                    } else {
+                        let mut base = title_case(filtered_parts[0]);
+                        if !found_gen.is_empty() {
+                            base = format!("{} {}", base, found_gen);
+                        }
+                        holder_name = base;
+                    }
+                }
+            }
+        }
+    }
+    (holder_name, edipi)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_dod_cn_standard() {
+        let (holder, edipi) = format_dod_cn("DOE.JOHN.ROBERT.1234567890");
+        assert_eq!(holder, "John Robert Doe");
+        assert_eq!(edipi, "1234567890");
+    }
+
+    #[test]
+    fn test_format_dod_cn_contractor() {
+        let (holder, edipi) = format_dod_cn("DOE.JOHN.R.CTR.1234567890");
+        assert_eq!(holder, "John R Doe");
+        assert_eq!(edipi, "1234567890");
+    }
+
+    #[test]
+    fn test_format_dod_cn_civilian_with_suffix() {
+        let (holder, edipi) = format_dod_cn("SMITH.JAMES.M.JR.CIV.9876543210");
+        assert_eq!(holder, "James M Smith Jr");
+        assert_eq!(edipi, "9876543210");
+    }
+
+    #[test]
+    fn test_format_dod_cn_two_part_name() {
+        let (holder, edipi) = format_dod_cn("BROWN.MARY.1122334455");
+        assert_eq!(holder, "Mary Brown");
+        assert_eq!(edipi, "1122334455");
+    }
 }

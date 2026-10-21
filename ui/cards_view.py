@@ -40,7 +40,7 @@ class CardsView(Gtk.Box):
         self.empty_status.set_icon_name("dialog-password-symbolic")
         self.empty_status.set_title("No Smart Card Detected")
         self.empty_status.set_description(
-            "Please plug in your smart card reader and insert your DoW Common Access Card (CAC) to inspect on-card certificates."
+            "Please plug in your smart card reader and insert your DoD Common Access Card (CAC) to inspect on-card certificates."
         )
 
         self.setup_ui()
@@ -62,7 +62,7 @@ class CardsView(Gtk.Box):
 
         # Header info
         header_group = Adw.PreferencesGroup()
-        label_text = GLib.markup_escape_text(card_stat.token_label or "DoW CAC")
+        label_text = GLib.markup_escape_text(card_stat.token_label or "DoD CAC")
         header_group.set_title(f"Inserted Card: {label_text}")
         r_text = GLib.markup_escape_text(card_stat.reader_name or "PCSC")
         s_text = GLib.markup_escape_text(card_stat.token_serial or "Active")
@@ -99,7 +99,7 @@ class CardsView(Gtk.Box):
             row.add_row(sub_name)
 
             if cert.edipi:
-                sub_edipi = Adw.ActionRow(title="DoW ID Number (EDIPI)", subtitle=GLib.markup_escape_text(cert.edipi))
+                sub_edipi = Adw.ActionRow(title="DoD ID Number (EDIPI)", subtitle=GLib.markup_escape_text(cert.edipi))
                 row.add_row(sub_edipi)
 
             sub_iss = Adw.ActionRow(title="Issuing Certificate Authority", subtitle=GLib.markup_escape_text(cert.issuer or "Unknown"))

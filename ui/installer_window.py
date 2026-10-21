@@ -127,7 +127,7 @@ class InstallerWindow(Adw.Window):
         hero_text.append(w_title)
 
         w_sub = Gtk.Label(
-            label="Automated Department of War (DoW) Common Access Card Middleware and Browser Configuration"
+            label="Automated Department of Defense (DoD) Common Access Card Middleware and Browser Configuration"
         )
         w_sub.add_css_class("hero-subtitle")
         w_sub.set_xalign(0)
@@ -231,10 +231,10 @@ class InstallerWindow(Adw.Window):
         self.switch_middleware.set_active(True)
         opts_group.add(self.switch_middleware)
 
-        # Component 2: DoW PKI Certificates
+        # Component 2: DoD PKI Certificates
         self.switch_certs = Adw.SwitchRow(
-            title="DoW PKI Trust Bundle (56 CAs)",
-            subtitle="Installs all unexpired DoW Root and Intermediate CAs into the system trust store.",
+            title="DoD PKI Trust Bundle (56 CAs)",
+            subtitle="Installs all unexpired DoD Root and Intermediate CAs into the system trust store.",
         )
         self.switch_certs.set_active(True)
         opts_group.add(self.switch_certs)
@@ -330,7 +330,7 @@ class InstallerWindow(Adw.Window):
         step_definitions = [
             ("packages", "Install and verify system packages (pcsc-lite, opensc, nss-tools)"),
             ("middleware", "Enable pcscd daemon and apply OpenSC Broadcom reader fix"),
-            ("certs", "Install DoW Root and Intermediate CAs into system store"),
+            ("certs", "Install DoD Root and Intermediate CAs into system store"),
             ("browsers", "Configure Firefox policies, 'Ask Every Time', and Chrome NSS DB"),
             ("desktop", "Install application menu shortcut and CLI commands"),
         ]
@@ -393,7 +393,7 @@ class InstallerWindow(Adw.Window):
         finish_text.append(f_title)
 
         f_sub = Gtk.Label(
-            label="Sentinel CAC Manager and DoW smart card authentication are now fully configured and active."
+            label="Sentinel CAC Manager and DoD smart card authentication are now fully configured and active."
         )
         f_sub.add_css_class("hero-subtitle")
         f_sub.set_xalign(0)
@@ -408,7 +408,7 @@ class InstallerWindow(Adw.Window):
         results_group.set_title("Configuration Summary")
 
         r1 = Adw.ActionRow(
-            title="DoW Certificate Authorities",
+            title="DoD Certificate Authorities",
             subtitle="56 Root and Intermediate CAs installed into system certificate trust store.",
         )
         b1 = Gtk.Label(label="Active")
@@ -640,11 +640,11 @@ class InstallerWindow(Adw.Window):
             self._set_step_status("packages", "skip")
             self._set_step_status("middleware", "skip")
 
-        # Step 3: DoW PKI Certificates
+        # Step 3: DoD PKI Certificates
         if do_certs:
             self._set_step_status("certs", "running")
-            self._set_progress(0.55, "Installing DoW Root and Intermediate CAs...")
-            self._append_log("[3/5] Installing DoW Certificate Authorities into system store...")
+            self._set_progress(0.55, "Installing DoD Root and Intermediate CAs...")
+            self._append_log("[3/5] Installing DoD Certificate Authorities into system store...")
             ok, msg = run_privileged_helper(
                 ["--certs", "--family", self.platform.family],
                 log_fn=self._append_log,
@@ -652,7 +652,7 @@ class InstallerWindow(Adw.Window):
             )
             if not ok:
                 self._set_step_status("certs", "error")
-                self._show_failure("Failed to install DoW certificates", msg)
+                self._show_failure("Failed to install DoD certificates", msg)
                 return
             self._set_step_status("certs", "success")
         else:
@@ -723,7 +723,7 @@ class InstallerWindow(Adw.Window):
 class InstallerApplication(Adw.Application):
     def __init__(self):
         super().__init__(
-            application_id="mil.dow.sentinel_cac_manager.installer",
+            application_id="mil.dod.sentinel_cac_manager.installer",
             flags=0,
         )
 

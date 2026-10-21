@@ -17,18 +17,18 @@
   </p>
 
   <p>
-    <img src="https://img.shields.io/badge/Version-v1.2.2-blue.svg?style=flat-square" alt="Version" />
+    <img src="https://img.shields.io/badge/Version-v1.3.0-blue.svg?style=flat-square" alt="Version" />
     <img src="https://img.shields.io/badge/Fedora-Tested-294172?style=flat-square&logo=fedora&logoColor=white" alt="Fedora" />
     <img src="https://img.shields.io/badge/Ubuntu-Tested-E95420?style=flat-square&logo=ubuntu&logoColor=white" alt="Ubuntu" />
   </p>
 </div>
 
-Sentinel CAC Manager verifies the smart card stack, installs the Department of War root and intermediate certificate authorities into the system trust store, registers security devices with supported web browsers, and monitors smart card insertion and certificate status.
+Sentinel CAC Manager verifies the smart card stack, installs the Department of Defense root and intermediate certificate authorities into the system trust store, registers security devices with supported web browsers, and monitors smart card insertion and certificate status.
 
 ## What It Does
 
 1. **Stack Verification** — Confirms `pcscd` daemon status, OpenSC PKCS#11 module presence, and reader connectivity.
-2. **System Trust Installation** — Deploys Department of War Root and Intermediate CA certificates to distribution trust stores (`update-ca-trust` / `update-ca-certificates`).
+2. **System Trust Installation** — Deploys Department of Defense Root and Intermediate CA certificates to distribution trust stores (`update-ca-trust` / `update-ca-certificates`).
 3. **Browser Integration** — Configures Mozilla Firefox enterprise policies, sets certificate prompting to ask every time, and configures Chrome and Chromium NSS security databases (`~/.pki/nssdb`).
 4. **Hardware Optimization** — Applies OpenSC configuration adjustments to prevent Broadcom smart card reader driver initialization delays.
 5. **Certificate Inspection** — Reads on-card digital certificates (PIV Authentication, Email Signature, Email Encryption, Device Authentication) and displays validity periods, issuing authorities, and key usage.

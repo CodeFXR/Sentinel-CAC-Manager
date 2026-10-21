@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Sentinel CAC Manager - DoW CAC Setup and Installer
+# Sentinel CAC Manager - DoD CAC Setup and Installer
 # Works on Ubuntu, Linux Mint, Pop!_OS, Zorin OS, Debian, and Fedora
 # ==============================================================================
 set -euo pipefail
@@ -123,31 +123,21 @@ if [ "${1:-}" = "--install-deps" ]; then
     cp -f "${SCRIPT_DIR}/core/privileged_helper.py" /usr/libexec/sentinel/privileged_helper.py
     chmod 0755 /usr/libexec/sentinel/privileged_helper.py
 
-    # Deploy DoW CA certificates to system directory
+    # Deploy DoD CA certificates to system directory and validate trust anchors (SEC-01)
     if [ -d "${SCRIPT_DIR}/certificates" ]; then
-        echo "[+] Deploying DoW CA certificates to /usr/share/sentinel/certificates/..."
+        echo "[+] Deploying DoD CA certificates to /usr/share/sentinel/certificates/..."
         mkdir -p /usr/share/sentinel/certificates
         cp -rf "${SCRIPT_DIR}/certificates/"* /usr/share/sentinel/certificates/
         chmod -R 0644 /usr/share/sentinel/certificates/* 2>/dev/null || true
         find /usr/share/sentinel/certificates -type d -exec chmod 0755 {} + 2>/dev/null || true
 
-        # Install system certificates into trust store
-        if [ "${FAMILY}" = "debian" ]; then
-            mkdir -p /usr/local/share/ca-certificates/dow
-            if [ -d "${SCRIPT_DIR}/certificates/all_cas" ]; then
-                cp -f "${SCRIPT_DIR}/certificates/all_cas/"*.crt /usr/local/share/ca-certificates/dow/ 2>/dev/null || true
-            fi
-            if [ -f "${SCRIPT_DIR}/certificates/DoW_Full_Chain.crt" ]; then
-                cp -f "${SCRIPT_DIR}/certificates/DoW_Full_Chain.crt" /usr/local/share/ca-certificates/dow/ 2>/dev/null || true
-            fi
-            update-ca-certificates --fresh 2>/dev/null || true
-        elif [ "${FAMILY}" = "fedora" ]; then
-            mkdir -p /etc/pki/ca-trust/source/anchors
-            if [ -f "${SCRIPT_DIR}/certificates/DoW_Full_Chain.pem" ]; then
-                cp -f "${SCRIPT_DIR}/certificates/DoW_Full_Chain.pem" /etc/pki/ca-trust/source/anchors/ 2>/dev/null || true
-            fi
-            update-ca-trust 2>/dev/null || true
+        # Clean legacy dow trust store if present
+        if [ -d /usr/local/share/ca-certificates/dow ]; then
+            rm -rf /usr/local/share/ca-certificates/dow
         fi
+
+        # Install system certificates into trust store via validated privileged helper
+        python3 /usr/libexec/sentinel/privileged_helper.py --certs --family "${FAMILY}" --certs-dir /usr/share/sentinel/certificates || true
     fi
 
     # Reset smart card ATR if card present
@@ -225,27 +215,19 @@ if [ "$NEEDS_ROOT" -eq 1 ]; then
         chmod 0755 /usr/libexec/sentinel/privileged_helper.py
 
         if [ -d "${SCRIPT_DIR}/certificates" ]; then
+            echo "[+] Deploying DoD CA certificates to /usr/share/sentinel/certificates/..."
             mkdir -p /usr/share/sentinel/certificates
             cp -rf "${SCRIPT_DIR}/certificates/"* /usr/share/sentinel/certificates/
             chmod -R 0644 /usr/share/sentinel/certificates/* 2>/dev/null || true
             find /usr/share/sentinel/certificates -type d -exec chmod 0755 {} + 2>/dev/null || true
 
-            if [ "${FAMILY}" = "debian" ]; then
-                mkdir -p /usr/local/share/ca-certificates/dow
-                if [ -d "${SCRIPT_DIR}/certificates/all_cas" ]; then
-                    cp -f "${SCRIPT_DIR}/certificates/all_cas/"*.crt /usr/local/share/ca-certificates/dow/ 2>/dev/null || true
-                fi
-                if [ -f "${SCRIPT_DIR}/certificates/DoW_Full_Chain.crt" ]; then
-                    cp -f "${SCRIPT_DIR}/certificates/DoW_Full_Chain.crt" /usr/local/share/ca-certificates/dow/ 2>/dev/null || true
-                fi
-                update-ca-certificates --fresh 2>/dev/null || true
-            elif [ "${FAMILY}" = "fedora" ]; then
-                mkdir -p /etc/pki/ca-trust/source/anchors
-                if [ -f "${SCRIPT_DIR}/certificates/DoW_Full_Chain.pem" ]; then
-                    cp -f "${SCRIPT_DIR}/certificates/DoW_Full_Chain.pem" /etc/pki/ca-trust/source/anchors/ 2>/dev/null || true
-                fi
-                update-ca-trust 2>/dev/null || true
+            # Clean legacy dow trust store if present
+            if [ -d /usr/local/share/ca-certificates/dow ]; then
+                rm -rf /usr/local/share/ca-certificates/dow
             fi
+
+            # Install system certificates into trust store via validated privileged helper
+            python3 /usr/libexec/sentinel/privileged_helper.py --certs --family "${FAMILY}" --certs-dir /usr/share/sentinel/certificates || true
         fi
 
         if command -v opensc-tool >/dev/null 2>&1; then
@@ -270,21 +252,17 @@ if [ "$NEEDS_ROOT" -eq 1 ]; then
             pkexec "${SCRIPT_DIR}/install" --install-deps
         else
             LAUNCHED=0
+            CMD_STR=$(printf 'sudo %q --install-deps; echo "Press Enter to continue..."; read -r' "${SCRIPT_DIR}/install")
             for term in x-terminal-emulator gnome-terminal ptyxis konsole xfce4-terminal mate-terminal alacritty kitty foot xterm; do
                 if command -v "$term" >/dev/null 2>&1; then
                     case "$term" in
                         gnome-terminal|mate-terminal|xfce4-terminal|ptyxis)
-                            "$term" -- bash -c "sudo '${SCRIPT_DIR}/install' --install-deps; echo 'Press Enter to continue...'; read -r"
+                            "$term" -- bash -c "$CMD_STR"
                             LAUNCHED=1
                             break
                             ;;
-                        konsole)
-                            "$term" -e bash -c "sudo '${SCRIPT_DIR}/install' --install-deps; echo 'Press Enter to continue...'; read -r"
-                            LAUNCHED=1
-                            break
-                            ;;
-                        *)
-                            "$term" -e "bash -c 'sudo \"${SCRIPT_DIR}/install\" --install-deps; echo \"Press Enter to continue...\"; read -r'"
+                        konsole|alacritty|kitty|foot|x-terminal-emulator|xterm|*)
+                            "$term" -e bash -c "$CMD_STR"
                             LAUNCHED=1
                             break
                             ;;
@@ -330,7 +308,7 @@ if [ "$WANT_GUI" -eq 1 ]; then
 fi
 
 echo "================================================================="
-echo "   Sentinel CAC Manager - Automated DoW CAC Installer"
+echo "   Sentinel CAC Manager - Automated DoD CAC Installer"
 echo "================================================================="
 echo "[+] Detected OS: ${PRETTY_NAME:-$ID} (Family: ${FAMILY})"
 
@@ -393,17 +371,17 @@ ESCAPED_ICON=$(escape_desktop_val "${ICON_DIR}/sentinel_cac_manager.png")
 cat <<EOF > "${APP_DIR}/sentinel_cac_manager.desktop"
 [Desktop Entry]
 Name=Sentinel CAC Manager
-GenericName=DoW Smart Card Manager
-Comment=Automate DoW CAC Middleware, Certificates, and Browser Authentication
+GenericName=DoD Smart Card Manager
+Comment=Automate DoD CAC Middleware, Certificates, and Browser Authentication
 Exec=python3 ${ESCAPED_SCRIPT} --gui
 Path=${ESCAPED_PATH}
 Icon=${ESCAPED_ICON}
 Terminal=false
 Type=Application
 Categories=Utility;Security;
-Keywords=CAC;PIV;DoW;SmartCard;Military;Security;Authentication;
+Keywords=CAC;PIV;DoD;SmartCard;Military;Security;Authentication;
 StartupNotify=true
-StartupWMClass=mil.dow.sentinel_cac_manager
+StartupWMClass=mil.dod.sentinel_cac_manager
 EOF
 chmod +x "${APP_DIR}/sentinel_cac_manager.desktop"
 rm -f "${APP_DIR}/sentinel_v2.desktop"

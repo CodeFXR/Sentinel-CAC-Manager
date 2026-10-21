@@ -49,7 +49,7 @@ class DiagnosticsView(Gtk.Box):
     def setup_ui(self):
         # 1. Portal Testing Group
         portal_group = Adw.PreferencesGroup()
-        portal_group.set_title("DoW Portal Testing")
+        portal_group.set_title("DoD Portal Testing")
         portal_group.set_description(
             "Click any portal to launch your default browser and test CAC PIN and certificate authentication:"
         )

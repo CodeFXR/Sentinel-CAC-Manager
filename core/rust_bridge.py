@@ -191,6 +191,16 @@ def is_cac_atr_rust(atr: str) -> bool:
     )
 
 
+def query_native_pcsc_rust():
+    """Query smart card readers, card presence, and ATR via native Rust PC/SC client."""
+    if is_rust_available() and hasattr(_sentinel_core, "query_native_pcsc"):
+        try:
+            return _sentinel_core.query_native_pcsc()
+        except Exception as e:
+            logger.debug(f"Rust query_native_pcsc failed: {e}")
+    return None
+
+
 class _PyPinBuffer:
     """Pure-Python fallback for secure PIN storage with zeroization on drop."""
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sentinel CAC Manager - Automated DoW CAC Manager for Ubuntu, Mint, Debian & Fedora Linux."""
+"""Sentinel CAC Manager - Automated DoD CAC Manager for Ubuntu, Mint, Debian & Fedora Linux."""
 
 import os
 import sys

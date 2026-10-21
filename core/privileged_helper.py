@@ -57,8 +57,12 @@ def get_certs_dir(override: str = None) -> str:
 
 CERTS_DIR = get_certs_dir()
 ALL_CAS_DIR = os.path.join(CERTS_DIR, "all_cas")
-FULL_CHAIN_PEM = os.path.join(CERTS_DIR, "DoW_Full_Chain.pem")
-FULL_CHAIN_CRT = os.path.join(CERTS_DIR, "DoW_Full_Chain.crt")
+FULL_CHAIN_PEM = os.path.join(CERTS_DIR, "DoD_Full_Chain.pem")
+if not os.path.isfile(FULL_CHAIN_PEM):
+    FULL_CHAIN_PEM = os.path.join(CERTS_DIR, "DoW_Full_Chain.pem")
+FULL_CHAIN_CRT = os.path.join(CERTS_DIR, "DoD_Full_Chain.crt")
+if not os.path.isfile(FULL_CHAIN_CRT):
+    FULL_CHAIN_CRT = os.path.join(CERTS_DIR, "DoW_Full_Chain.crt")
 
 OPENSC_DIRECTIVE = "card_drivers = piv-II, cac, cac1;"
 
@@ -89,8 +93,11 @@ def ensure_system_helper():
         current_script = os.path.abspath(__file__)
         if current_script != sys_helper:
             os.makedirs(sys_dir, exist_ok=True)
-            temp_dst = sys_helper + ".tmp"
-            shutil.copyfile(current_script, temp_dst)
+            import tempfile
+            with tempfile.NamedTemporaryFile(dir=sys_dir, delete=False) as f_tmp:
+                temp_dst = f_tmp.name
+                with open(current_script, "rb") as f_src:
+                    f_tmp.write(f_src.read())
             os.chmod(temp_dst, 0o755)
             try:
                 os.chown(temp_dst, 0, 0)
@@ -136,11 +143,13 @@ def fix_opensc_hang():
         log(f"OpenSC already optimized in {target_conf}")
         return
 
-    # Backup if exists
+    # Backup if exists (prevent symlink overwrite attacks)
     bak = f"{target_conf}.sentinel-bak"
-    if os.path.isfile(target_conf) and not os.path.isfile(bak):
+    if os.path.isfile(target_conf) and not os.path.exists(bak) and not os.path.islink(bak):
         try:
-            shutil.copy2(target_conf, bak)
+            fd_bak = os.open(bak, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            with open(fd_bak, "w") as f_bak:
+                f_bak.write(original)
             log(f"Backed up original configuration to {bak}")
         except Exception as e:
             log(f"Backup notice: {e}")
@@ -160,10 +169,14 @@ def fix_opensc_hang():
 """
 
     try:
-        os.makedirs(os.path.dirname(target_conf), exist_ok=True)
-        with open(target_conf, "w") as f:
-            f.write(updated)
-        os.chmod(target_conf, 0o644)
+        conf_dir = os.path.dirname(target_conf)
+        os.makedirs(conf_dir, exist_ok=True)
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode="w", dir=conf_dir, delete=False) as f_tmp:
+            tmp_name = f_tmp.name
+            f_tmp.write(updated)
+        os.chmod(tmp_name, 0o644)
+        os.replace(tmp_name, target_conf)
         log(f"Optimized {target_conf} with CAC/PIV drivers.")
     except Exception as e:
         log(f"Failed to update {target_conf}: {e}")
@@ -279,16 +292,20 @@ def _write_secure_cert(src_path: str, dst_path: str, expected_dir: str) -> bool:
         log(f"Skipping unvalidated or insecure certificate source: {src_path}")
         return False
 
-    temp_dst = f"{dst_path}.tmp.{os.getpid()}"
+    dst_dir = os.path.dirname(dst_path)
+    os.makedirs(dst_dir, exist_ok=True)
+    temp_dst = None
     try:
-        with open(temp_dst, "wb") as f_out:
+        import tempfile
+        with tempfile.NamedTemporaryFile(dir=dst_dir, delete=False) as f_out:
+            temp_dst = f_out.name
             f_out.write(data)
         os.chmod(temp_dst, 0o644)
         os.replace(temp_dst, dst_path)
         return True
     except Exception as e:
         log(f"Error writing certificate to {dst_path}: {e}")
-        if os.path.exists(temp_dst):
+        if temp_dst and os.path.exists(temp_dst):
             try:
                 os.remove(temp_dst)
             except Exception:
@@ -297,9 +314,9 @@ def _write_secure_cert(src_path: str, dst_path: str, expected_dir: str) -> bool:
 
 
 def install_system_certificates(distro_family: str):
-    log("Installing DoW Root and Intermediate CA certificates into system store...")
+    log("Installing DoD Root and Intermediate CA certificates into system store...")
     if distro_family == "debian":
-        target_dir = "/usr/local/share/ca-certificates/dow"
+        target_dir = "/usr/local/share/ca-certificates/dod"
         os.makedirs(target_dir, exist_ok=True)
         count = 0
         if os.path.isdir(ALL_CAS_DIR):
@@ -311,7 +328,7 @@ def install_system_certificates(distro_family: str):
                         count += 1
         # Also deploy the full chain CRT bundle for applications that reference it
         if os.path.isfile(FULL_CHAIN_CRT):
-            if _write_secure_cert(FULL_CHAIN_CRT, os.path.join(target_dir, "DoW_Full_Chain.crt"), CERTS_DIR):
+            if _write_secure_cert(FULL_CHAIN_CRT, os.path.join(target_dir, "DoD_Full_Chain.crt"), CERTS_DIR):
                 count += 1
         log(f"Copied {count} CA certificates to {target_dir}")
         res = subprocess.run(["update-ca-certificates", "--fresh"], capture_output=True, text=True)
@@ -319,48 +336,31 @@ def install_system_certificates(distro_family: str):
     elif distro_family == "fedora":
         target_dir = "/etc/pki/ca-trust/source/anchors"
         os.makedirs(target_dir, exist_ok=True)
-        dst = os.path.join(target_dir, "DoW_Full_Chain.pem")
+        dst = os.path.join(target_dir, "DoD_Full_Chain.pem")
         if _write_secure_cert(FULL_CHAIN_PEM, dst, CERTS_DIR):
             log(f"Installed full trust bundle into {dst}")
         res = subprocess.run(["update-ca-trust"], capture_output=True, text=True)
         log("Ran update-ca-trust successfully.")
     else:
         # Fallback to update-ca-certificates
-        target_dir = "/usr/local/share/ca-certificates/dow"
+        target_dir = "/usr/local/share/ca-certificates/dod"
         os.makedirs(target_dir, exist_ok=True)
         if os.path.isfile(FULL_CHAIN_CRT):
-            _write_secure_cert(FULL_CHAIN_CRT, os.path.join(target_dir, "DoW_Full_Chain.crt"), CERTS_DIR)
+            _write_secure_cert(FULL_CHAIN_CRT, os.path.join(target_dir, "DoD_Full_Chain.crt"), CERTS_DIR)
         subprocess.run(["update-ca-certificates"], capture_output=True)
         log("Updated system ca certificates.")
 
 
 def install_firefox_policies(module_path: str, distro_family: str):
-    log("Installing Firefox Enterprise Policies...")
+    log("Installing Firefox Enterprise Policies with safe deep merge...")
     import json
+    import tempfile
 
     cert_path = (
-        "/usr/local/share/ca-certificates/dow/DoW_Full_Chain.crt"
+        "/usr/local/share/ca-certificates/dod/DoD_Full_Chain.crt"
         if distro_family == "debian"
-        else "/etc/pki/ca-trust/source/anchors/DoW_Full_Chain.pem"
+        else "/etc/pki/ca-trust/source/anchors/DoD_Full_Chain.pem"
     )
-
-    policy_data = {
-        "policies": {
-            "Certificates": {
-                "ImportEnterpriseRoots": True,
-                "Install": [cert_path],
-            },
-            "SecurityDevices": {
-                "DoW CAC": module_path,
-                "DoD CAC": module_path,
-            },
-            "Preferences": {
-                "security.default_personal_cert": "Ask Every Time",
-                "security.enterprise_roots.enabled": True,
-            },
-        }
-    }
-    content = json.dumps(policy_data, indent=2)
 
     policy_targets = [
         "/etc/firefox/policies/policies.json",
@@ -373,23 +373,65 @@ def install_firefox_policies(module_path: str, distro_family: str):
 
     for target in policy_targets:
         try:
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            with open(target, "w") as f:
-                f.write(content)
-            log(f"Wrote Firefox policy: {target}")
-        except Exception:
-            pass
+            target_dir = os.path.dirname(target)
+            os.makedirs(target_dir, exist_ok=True)
+            existing_data = {}
+            if os.path.isfile(target):
+                try:
+                    with open(target, "r") as f_ex:
+                        existing_data = json.load(f_ex)
+                except Exception:
+                    existing_data = {}
+
+            policies = existing_data.get("policies", {})
+
+            # Deep merge Certificates
+            certs_block = policies.get("Certificates", {})
+            certs_block["ImportEnterpriseRoots"] = True
+            install_list = certs_block.get("Install", [])
+            if cert_path not in install_list:
+                install_list.append(cert_path)
+            certs_block["Install"] = install_list
+            policies["Certificates"] = certs_block
+
+            # Deep merge SecurityDevices
+            sec_devices = policies.get("SecurityDevices", {})
+            sec_devices["DoD CAC"] = module_path
+            sec_devices["DoW CAC"] = module_path
+            policies["SecurityDevices"] = sec_devices
+
+            # Deep merge Preferences
+            prefs = policies.get("Preferences", {})
+            prefs["security.default_personal_cert"] = "Ask Every Time"
+            prefs["security.enterprise_roots.enabled"] = True
+            policies["Preferences"] = prefs
+
+            existing_data["policies"] = policies
+            content = json.dumps(existing_data, indent=2)
+
+            with tempfile.NamedTemporaryFile(mode="w", dir=target_dir, delete=False) as f_out:
+                tmp_name = f_out.name
+                f_out.write(content)
+            os.chmod(tmp_name, 0o644)
+            os.replace(tmp_name, target)
+            log(f"Configured Firefox policy in {target}")
+        except Exception as e:
+            log(f"Firefox policy note for {target}: {e}")
 
 
 def install_p11_kit_module(module_path: str):
     log("Installing system-wide p11-kit module...")
+    import tempfile
     mod_dir = "/etc/pkcs11/modules"
     os.makedirs(mod_dir, exist_ok=True)
     mod_file = os.path.join(mod_dir, "opensc.module")
     content = f"# Added by Sentinel CAC Manager\nmodule: {module_path}\n"
     try:
-        with open(mod_file, "w") as f:
-            f.write(content)
+        with tempfile.NamedTemporaryFile(mode="w", dir=mod_dir, delete=False) as f_out:
+            tmp_name = f_out.name
+            f_out.write(content)
+        os.chmod(tmp_name, 0o644)
+        os.replace(tmp_name, mod_file)
         log(f"Wrote system p11-kit config: {mod_file}")
     except Exception as e:
         log(f"p11-kit config note: {e}")
@@ -446,6 +488,7 @@ def main():
     parser.add_argument("--service", action="store_true", help="enable pcscd only")
     parser.add_argument("--reader-fix", action="store_true", help="fix opensc.conf only")
     parser.add_argument("--policies", action="store_true", help="install policies only")
+    parser.add_argument("--sync-helper", action="store_true", help="install/sync helper into /usr/libexec/sentinel")
 
     args = parser.parse_args()
 
@@ -457,11 +500,16 @@ def main():
     if args.certs_dir:
         CERTS_DIR = get_certs_dir(args.certs_dir)
         ALL_CAS_DIR = os.path.join(CERTS_DIR, "all_cas")
-        FULL_CHAIN_PEM = os.path.join(CERTS_DIR, "DoW_Full_Chain.pem")
-        FULL_CHAIN_CRT = os.path.join(CERTS_DIR, "DoW_Full_Chain.crt")
+        FULL_CHAIN_PEM = os.path.join(CERTS_DIR, "DoD_Full_Chain.pem")
+        if not os.path.isfile(FULL_CHAIN_PEM):
+            FULL_CHAIN_PEM = os.path.join(CERTS_DIR, "DoW_Full_Chain.pem")
+        FULL_CHAIN_CRT = os.path.join(CERTS_DIR, "DoD_Full_Chain.crt")
+        if not os.path.isfile(FULL_CHAIN_CRT):
+            FULL_CHAIN_CRT = os.path.join(CERTS_DIR, "DoW_Full_Chain.crt")
 
-    # Keep protected system helper in sync
-    ensure_system_helper()
+    # Only sync system helper when explicitly requested during administrative install (SEC-02)
+    if args.sync_helper:
+        ensure_system_helper()
 
     if args.packages or args.all:
         install_system_packages(args.family)

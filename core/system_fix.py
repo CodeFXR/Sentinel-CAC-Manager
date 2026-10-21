@@ -180,8 +180,8 @@ def run_full_setup(
 
     _progress(1.0, "Setup Complete! CAC is ready for browser authentication.")
     result["success"] = True
-    result["message"] = "All system services, DoW certificates, and browsers configured successfully!"
-    _log("[SUCCESS] Full DoW CAC configuration complete!")
+    result["message"] = "All system services, DoD certificates, and browsers configured successfully!"
+    _log("[SUCCESS] Full DoD CAC configuration complete!")
     return result
 
 
@@ -263,21 +263,22 @@ def install_desktop_integration(
 
         desktop_content = f"""[Desktop Entry]
 Name=Sentinel CAC Manager
-GenericName=DoW Smart Card Manager
-Comment=Automate DoW CAC Middleware, Certificates, and Browser Authentication
+GenericName=DoD Smart Card Manager
+Comment=Automate DoD CAC Middleware, Certificates, and Browser Authentication
 Exec=python3 {escaped_script} --gui
 Path={escaped_project_dir}
 Icon={escaped_icon_path}
 Terminal=false
 Type=Application
 Categories=Utility;Security;
-Keywords=CAC;PIV;DoW;SmartCard;Military;Security;Authentication;
+Keywords=CAC;PIV;DoD;SmartCard;Military;Security;Authentication;
 StartupNotify=true
-StartupWMClass=mil.dow.sentinel_cac_manager
+StartupWMClass=mil.dod.sentinel_cac_manager
 """
-        desktop_tmp = f"{desktop_file}.tmp.{os.getpid()}"
-        with open(desktop_tmp, "w") as f:
-            f.write(desktop_content)
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode="w", dir=app_dir, delete=False) as f_dt:
+            desktop_tmp = f_dt.name
+            f_dt.write(desktop_content)
         os.chmod(desktop_tmp, 0o644)
         os.replace(desktop_tmp, desktop_file)
 
@@ -297,9 +298,9 @@ StartupWMClass=mil.dow.sentinel_cac_manager
         launcher_script = f"""#!/usr/bin/env bash
 exec python3 {quoted_script} "$@"
 """
-        launcher_tmp = f"{launcher_path}.tmp.{os.getpid()}"
-        with open(launcher_tmp, "w") as f:
-            f.write(launcher_script)
+        with tempfile.NamedTemporaryFile(mode="w", dir=bin_dir, delete=False) as f_ln:
+            launcher_tmp = f_ln.name
+            f_ln.write(launcher_script)
         os.chmod(launcher_tmp, 0o755)
         os.replace(launcher_tmp, launcher_path)
 

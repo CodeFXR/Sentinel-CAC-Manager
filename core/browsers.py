@@ -52,6 +52,7 @@ def get_firefox_policies_json_content(module_path: str, cert_path: str) -> str:
                 "Install": [cert_path],
             },
             "SecurityDevices": {
+                "DoD CAC": module_path,
                 "DoW CAC": module_path,
             },
             "Preferences": {
@@ -103,7 +104,7 @@ def configure_firefox_user_js(profile_dir: str) -> bool:
 
 
 def configure_firefox_pkcs11_txt(profile_dir: str, module_path: str) -> bool:
-    """Ensure DoW CAC security device is loaded in profile pkcs11.txt."""
+    """Ensure DoD CAC security device is loaded in profile pkcs11.txt."""
     pkcs11_txt = os.path.join(profile_dir, "pkcs11.txt")
     if not os.path.isfile(pkcs11_txt):
         # Create minimal valid pkcs11.txt
@@ -113,7 +114,7 @@ def configure_firefox_pkcs11_txt(profile_dir: str, module_path: str) -> bool:
             f"parameters=configdir='sql:{profile_dir}' certPrefix='' keyPrefix='' secmod='' flags= optimizeSpace\n"
             f"NSS=Flags=internal,critical trustOrder=75 cipherOrder=100 slotParams=(1={{slotFlags=[ECC,RSA,DSA,DH,RC2,RC4,DES,RANDOM,SHA1,MD5,MD2,SSL,TLS,AES,Camellia,SEED,SHA256,SHA512] askpw=any timeout=30}})\n\n"
             f"library={module_path}\n"
-            f"name=DoW CAC\n\n"
+            f"name=DoD CAC\n\n"
         )
         try:
             with open(pkcs11_txt, "w", encoding="utf-8") as f:
@@ -127,12 +128,12 @@ def configure_firefox_pkcs11_txt(profile_dir: str, module_path: str) -> bool:
         with open(pkcs11_txt, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
 
-        # Check if DoW CAC or the module is already registered
-        if "name=DoW CAC" in content or module_path in content or "p11-kit-proxy" in content:
+        # Check if DoD CAC or the module is already registered
+        if "name=DoD CAC" in content or "name=DoW CAC" in content or module_path in content or "p11-kit-proxy" in content:
             return True
 
-        # Append DoW CAC module
-        block = f"\nlibrary={module_path}\nname=DoW CAC\n\n"
+        # Append DoD CAC module
+        block = f"\nlibrary={module_path}\nname=DoD CAC\n\n"
         with open(pkcs11_txt, "a", encoding="utf-8") as f:
             f.write(block)
         return True
@@ -198,20 +199,20 @@ def configure_chrome_nssdb(module_path: str, log_fn=None) -> Tuple[bool, str]:
     try:
         res_list = subprocess.run([modutil, "-dbdir", f"sql:{nssdb}", "-list"], capture_output=True, text=True, timeout=4)
         list_out = res_list.stdout
-        if "DoW CAC" in list_out or "DoD CAC" in list_out or "p11-kit-proxy" in list_out or "OpenSC" in list_out:
+        if "DoD CAC" in list_out or "DoW CAC" in list_out or "p11-kit-proxy" in list_out or "OpenSC" in list_out:
             if log_fn:
                 log_fn("[Chrome] Smart card module already active in ~/.pki/nssdb")
         else:
             # Register module. Note: feeding input=b'\n' prevents interactive prompt hanging!
             res_add = subprocess.run(
-                [modutil, "-force", "-dbdir", f"sql:{nssdb}", "-add", "DoW CAC", "-libfile", module_path],
+                [modutil, "-force", "-dbdir", f"sql:{nssdb}", "-add", "DoD CAC", "-libfile", module_path],
                 input=b"\n",
                 capture_output=True,
                 timeout=5,
             )
             if res_add.returncode == 0:
                 if log_fn:
-                    log_fn("[Chrome] Successfully registered DoW CAC module in ~/.pki/nssdb")
+                    log_fn("[Chrome] Successfully registered DoD CAC module in ~/.pki/nssdb")
             else:
                 err = res_add.stderr.decode(errors="replace").strip()
                 if log_fn:
@@ -223,7 +224,7 @@ def configure_chrome_nssdb(module_path: str, log_fn=None) -> Tuple[bool, str]:
     from core.certificates import import_root_cas_to_nss
     count, errors = import_root_cas_to_nss(nssdb, log_fn)
     if log_fn:
-        log_fn(f"[Chrome] Imported {count} DoW CA certificates into ~/.pki/nssdb")
+        log_fn(f"[Chrome] Imported {count} DoD CA certificates into ~/.pki/nssdb")
 
     return True, "Chrome NSS DB configured successfully"
 
@@ -237,6 +238,16 @@ def configure_all_browsers(log_fn=None) -> Dict[str, Any]:
         "snap_ok": False,
         "errors": [],
     }
+
+    # Warn if active browser instances are running (SEC-07)
+    if is_browser_running("firefox"):
+        if log_fn:
+            log_fn("[WARNING] Firefox is currently running! Please restart Firefox after configuration to load the new smart card device.")
+    for b_proc in ["chrome", "chromium", "brave", "edge"]:
+        if is_browser_running(b_proc):
+            if log_fn:
+                log_fn(f"[WARNING] {b_proc} is currently running! Please restart it after configuration to release NSS database locks.")
+            break
 
     module_path = find_opensc_module()
     if not module_path:
@@ -275,7 +286,7 @@ def configure_all_browsers(log_fn=None) -> Dict[str, Any]:
         # B. pkcs11.txt
         if configure_firefox_pkcs11_txt(p, module_path):
             if log_fn:
-                log_fn("   [OK] Loaded DoW CAC module in pkcs11.txt")
+                log_fn("   [OK] Loaded DoD CAC module in pkcs11.txt")
         else:
             results["errors"].append(f"Failed to update pkcs11.txt in {p_name}")
 
@@ -283,7 +294,7 @@ def configure_all_browsers(log_fn=None) -> Dict[str, Any]:
         from core.certificates import import_root_cas_to_nss
         cnt, errs = import_root_cas_to_nss(p, log_fn=None)
         if log_fn:
-            log_fn(f"   [OK] Imported {cnt} DoW CAs into cert9.db")
+            log_fn(f"   [OK] Imported {cnt} DoD CAs into cert9.db")
         if errs:
             results["errors"].extend(errs)
 

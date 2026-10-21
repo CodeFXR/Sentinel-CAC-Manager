@@ -69,7 +69,7 @@ class DashboardView(Gtk.Box):
         hero_text.append(title)
 
         subtitle = Gtk.Label(
-            label="Automated DoW Common Access Card Middleware and Browser Integration"
+            label="Automated DoD Common Access Card Middleware and Browser Integration"
         )
         subtitle.add_css_class("hero-subtitle")
         subtitle.set_xalign(0)
@@ -88,7 +88,7 @@ class DashboardView(Gtk.Box):
         setup_group = Adw.PreferencesGroup()
         setup_group.set_title("Automated Configuration")
         setup_group.set_description(
-            "Configures Firefox &amp; Chrome, installs all DoW Root and Issuing CAs, sets 'Ask Every Time' certificate prompt, and starts middleware."
+            "Configures Firefox &amp; Chrome, installs all DoD Root and Issuing CAs, sets 'Ask Every Time' certificate prompt, and starts middleware."
         )
 
         setup_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -152,7 +152,7 @@ class DashboardView(Gtk.Box):
         self.holder_row.set_subtitle("Insert CAC to read identity")
         self.id_group.add(self.holder_row)
 
-        self.edipi_row = Adw.ActionRow(title="DoW ID Number (EDIPI)")
+        self.edipi_row = Adw.ActionRow(title="DoD ID Number (EDIPI)")
         self.edipi_row.set_subtitle("—")
         self.id_group.add(self.edipi_row)
 
@@ -165,7 +165,7 @@ class DashboardView(Gtk.Box):
     def update_status(self, card_stat: SmartCardStatus, system_ready: bool):
         # Update Banner
         if system_ready and card_stat.card_present:
-            self.status_banner.set_label("System Ready — DoW CAC Ready for Browser Authentication")
+            self.status_banner.set_label("System Ready — DoD CAC Ready for Browser Authentication")
             self.status_banner.remove_css_class("banner-warning")
             self.status_banner.add_css_class("banner-ready")
         elif not system_ready:
@@ -201,7 +201,7 @@ class DashboardView(Gtk.Box):
             self.card_badge.remove_css_class("badge-danger")
             self.card_badge.add_css_class("badge-success")
         else:
-            self.card_row.set_subtitle("Card slot empty. Please insert your DoW CAC.")
+            self.card_row.set_subtitle("Card slot empty. Please insert your DoD CAC.")
             self.card_badge.set_label("No Card")
             self.card_badge.remove_css_class("badge-success")
             self.card_badge.add_css_class("badge-warning")
@@ -209,10 +209,10 @@ class DashboardView(Gtk.Box):
         # Update Cardholder Details
         prim_cert = card_stat.primary_certificate
         if card_stat.card_present and prim_cert:
-            h_name = GLib.markup_escape_text(prim_cert.holder_name or "DoW Cardholder")
+            h_name = GLib.markup_escape_text(prim_cert.holder_name or "DoD Cardholder")
             e_id = GLib.markup_escape_text(prim_cert.edipi or "Verified on Card")
             s_text = GLib.markup_escape_text(prim_cert.status_text or "Active")
-            i_cn = GLib.markup_escape_text(prim_cert.issuer_cn or "DoW CA")
+            i_cn = GLib.markup_escape_text(prim_cert.issuer_cn or "DoD CA")
             self.holder_row.set_subtitle(h_name)
             self.edipi_row.set_subtitle(e_id)
             self.cert_status_row.set_subtitle(f"{s_text} (Issuer: {i_cn})")
@@ -254,7 +254,7 @@ class DashboardView(Gtk.Box):
 
         if result.get("success"):
             self.step_label.set_label("Configuration Complete! Browsers and CAC ready.")
-            self.main_window.show_toast("DoW CAC Full Setup successfully completed!")
+            self.main_window.show_toast("DoD CAC Full Setup successfully completed!")
         else:
             self.step_label.set_label(f"Setup Error: {result.get('message', 'Failed')}")
             self.main_window.show_toast(f"Setup Warning: {result.get('message', 'Check logs')}")

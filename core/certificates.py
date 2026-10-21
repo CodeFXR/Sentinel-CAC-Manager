@@ -1,4 +1,4 @@
-"""DoW Certificate Bundle and Trust Store Management for Sentinel CAC Manager."""
+"""DoD Certificate Bundle and Trust Store Management for Sentinel CAC Manager."""
 
 from __future__ import annotations
 
@@ -18,9 +18,18 @@ CERTS_BASE_DIR = os.path.join(SCRIPT_DIR, "certificates")
 ROOTS_DIR = os.path.join(CERTS_BASE_DIR, "roots")
 INTERMEDIATES_DIR = os.path.join(CERTS_BASE_DIR, "intermediates")
 ALL_CAS_DIR = os.path.join(CERTS_BASE_DIR, "all_cas")
-FULL_CHAIN_PEM = os.path.join(CERTS_BASE_DIR, "DoW_Full_Chain.pem")
-FULL_CHAIN_CRT = os.path.join(CERTS_BASE_DIR, "DoW_Full_Chain.crt")
-ROOTS_PEM = os.path.join(CERTS_BASE_DIR, "DoW_Roots.pem")
+
+FULL_CHAIN_PEM = os.path.join(CERTS_BASE_DIR, "DoD_Full_Chain.pem")
+if not os.path.isfile(FULL_CHAIN_PEM):
+    FULL_CHAIN_PEM = os.path.join(CERTS_BASE_DIR, "DoW_Full_Chain.pem")
+
+FULL_CHAIN_CRT = os.path.join(CERTS_BASE_DIR, "DoD_Full_Chain.crt")
+if not os.path.isfile(FULL_CHAIN_CRT):
+    FULL_CHAIN_CRT = os.path.join(CERTS_BASE_DIR, "DoW_Full_Chain.crt")
+
+ROOTS_PEM = os.path.join(CERTS_BASE_DIR, "DoD_Roots.pem")
+if not os.path.isfile(ROOTS_PEM):
+    ROOTS_PEM = os.path.join(CERTS_BASE_DIR, "DoW_Roots.pem")
 
 
 @dataclass
@@ -32,7 +41,7 @@ class CertificateItem:
 
 
 def get_available_certificates() -> List[CertificateItem]:
-    """Return all bundled DoW Root and Intermediate certificates."""
+    """Return all bundled DoD Root and Intermediate certificates."""
     items = []
     if os.path.isdir(ALL_CAS_DIR):
         for fname in sorted(os.listdir(ALL_CAS_DIR)):
@@ -45,27 +54,30 @@ def get_available_certificates() -> List[CertificateItem]:
 
 
 def is_system_trust_installed(platform: Optional[PlatformInfo] = None) -> bool:
-    """Check if DoW Root and Intermediate CAs are installed in system trust."""
+    """Check if DoD Root and Intermediate CAs are installed in system trust."""
     plat = platform or detect_platform()
     if plat.is_debian_derivative:
-        # Check /usr/local/share/ca-certificates/dow or dod
-        for d in ["/usr/local/share/ca-certificates/dow", "/usr/local/share/ca-certificates/dod"]:
+        # Check /usr/local/share/ca-certificates/dod or dow
+        for d in ["/usr/local/share/ca-certificates/dod", "/usr/local/share/ca-certificates/dow"]:
             if os.path.isdir(d) and any(f.endswith(".crt") for f in os.listdir(d)):
                 return True
-        # Check /etc/ssl/certs/ for DoW/DoD Root CA
+        # Check /etc/ssl/certs/ for DoD Root CA
         if os.path.isfile("/etc/ssl/certs/DoD_Root_CA_3.pem") or os.path.isfile("/etc/ssl/certs/DoD_Root_CA_6.pem"):
             return True
         return False
     elif plat.is_fedora_derivative:
-        target_dow = os.path.join(plat.trust_dir, "DoW_Full_Chain.pem")
         target_dod = os.path.join(plat.trust_dir, "DoD_Full_Chain.pem")
-        return (os.path.isfile(target_dow) and os.path.getsize(target_dow) > 1000) or (
-            os.path.isfile(target_dod) and os.path.getsize(target_dod) > 1000
+        target_dow = os.path.join(plat.trust_dir, "DoW_Full_Chain.pem")
+        return (os.path.isfile(target_dod) and os.path.getsize(target_dod) > 1000) or (
+            os.path.isfile(target_dow) and os.path.getsize(target_dow) > 1000
         )
     else:
         # Generic check
-        target = os.path.join(plat.trust_dir, "DoW_Full_Chain.crt")
-        return os.path.isfile(target) or os.path.isfile(os.path.join(plat.trust_dir, "DoW_Full_Chain.pem"))
+        for candidate in ["DoD_Full_Chain.crt", "DoD_Full_Chain.pem", "DoW_Full_Chain.crt", "DoW_Full_Chain.pem"]:
+            t = os.path.join(plat.trust_dir, candidate)
+            if os.path.isfile(t) and os.path.getsize(t) > 1000:
+                return True
+        return False
 
 
 def get_nss_installed_cas(db_dir: str) -> List[str]:

@@ -24,7 +24,7 @@ class TestRustBridge(unittest.TestCase):
     def test_rust_availability(self):
         # On this build system, Rust is compiled and should be operational
         self.assertTrue(is_rust_available())
-        self.assertEqual(get_rust_version(), "1.2.2")
+        self.assertEqual(get_rust_version(), "1.3.0")
 
     def test_cac_atr_detection(self):
         # Known Oberthur ID-One PIV CAC ATR
@@ -67,13 +67,47 @@ class TestRustBridge(unittest.TestCase):
         self.assertEqual(p.returncode, 0)
         der_bytes = p.stdout
 
-        cert = parse_card_certificate_rust("0005", "CAC ID / PIV Authentication", "DoW Web Logon", der_bytes)
+        cert = parse_card_certificate_rust("0005", "CAC ID / PIV Authentication", "DoD Web Logon", der_bytes)
         self.assertIsNotNone(cert)
         self.assertEqual(cert.id, "0005")
         self.assertEqual(cert.holder_name, "Jane E Smith")
         self.assertEqual(cert.edipi, "9876543210")
         self.assertTrue(cert.is_valid)
         self.assertIsNotNone(cert.valid_to)
+
+    def test_contractor_and_suffix_name_parsing(self):
+        # Contractor CAC: DOE.JOHN.R.CTR.1234567890
+        cmd_ctr = [
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", "/dev/null",
+            "-nodes", "-subj", "/C=US/O=U.S. Government/OU=DoD/OU=PKI/CN=DOE.JOHN.R.CTR.1234567890",
+            "-days", "30", "-outform", "DER"
+        ]
+        p1 = subprocess.run(cmd_ctr, capture_output=True)
+        self.assertEqual(p1.returncode, 0)
+        cert_ctr = parse_card_certificate_rust("0005", "CAC ID", "DoD Web Logon", p1.stdout)
+        self.assertIsNotNone(cert_ctr)
+        self.assertEqual(cert_ctr.holder_name, "John R Doe")
+        self.assertEqual(cert_ctr.edipi, "1234567890")
+
+        # Civilian with generational suffix: WILLIAMS.JAMES.T.JR.CIV.9876543210
+        cmd_civ = [
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", "/dev/null",
+            "-nodes", "-subj", "/C=US/O=U.S. Government/OU=DoD/OU=PKI/CN=WILLIAMS.JAMES.T.JR.CIV.9876543210",
+            "-days", "30", "-outform", "DER"
+        ]
+        p2 = subprocess.run(cmd_civ, capture_output=True)
+        self.assertEqual(p2.returncode, 0)
+        cert_civ = parse_card_certificate_rust("0005", "CAC ID", "DoD Web Logon", p2.stdout)
+        self.assertIsNotNone(cert_civ)
+        self.assertEqual(cert_civ.holder_name, "James T Williams Jr")
+        self.assertEqual(cert_civ.edipi, "9876543210")
+
+    def test_native_pcsc_query(self):
+        from core.rust_bridge import query_native_pcsc_rust
+        status = query_native_pcsc_rust()
+        if status is not None:
+            self.assertTrue(status.available)
+            self.assertIsInstance(status.readers, list)
 
 
 class TestCliSanitization(unittest.TestCase):

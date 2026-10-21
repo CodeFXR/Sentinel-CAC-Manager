@@ -232,7 +232,7 @@ class MainWindow(Adw.ApplicationWindow):
 class SentinelApplication(Adw.Application):
     def __init__(self):
         super().__init__(
-            application_id="mil.dow.sentinel_cac_manager",
+            application_id="mil.dod.sentinel_cac_manager",
             flags=0,
         )
 

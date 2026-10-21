@@ -89,11 +89,11 @@ class SystemView(Gtk.Box):
 
         # 2. Certificates Group
         self.cert_group = Adw.PreferencesGroup()
-        self.cert_group.set_title("DoW Certificate Authority Store")
-        self.cert_group.set_description("Installs all DoW Root and Intermediate CAs into system trust:")
+        self.cert_group.set_title("DoD Certificate Authority Store")
+        self.cert_group.set_description("Installs all DoD Root and Intermediate CAs into system trust:")
 
         self.sys_cert_row = Adw.ActionRow(title="System CA Trust Store")
-        self.sys_cert_row.set_subtitle("DoW Root CA 3, 4, 5, 6, ID CAs 59-81, Email CAs 59-81")
+        self.sys_cert_row.set_subtitle("DoD Root CA 3, 4, 5, 6, ID CAs 59-81, Email CAs 59-81")
         self.sys_cert_badge = Gtk.Label(label="Checking")
         self.sys_cert_badge.add_css_class("badge-info")
         self.sys_cert_row.add_suffix(self.sys_cert_badge)
@@ -224,7 +224,7 @@ class SystemView(Gtk.Box):
             self.chrome_badge.set_label("Configured")
             self.chrome_badge.remove_css_class("badge-warning")
             self.chrome_badge.add_css_class("badge-success")
-            self.chrome_row.set_subtitle("~/.pki/nssdb module loaded and DoW certificates trusted")
+            self.chrome_row.set_subtitle("~/.pki/nssdb module loaded and DoD certificates trusted")
         else:
             self.chrome_badge.set_label("Setup Needed")
             self.chrome_badge.remove_css_class("badge-success")
@@ -257,7 +257,7 @@ class SystemView(Gtk.Box):
     def _run_install_certs(self, family: str):
         from core.system_fix import run_privileged_helper
         ok, msg = run_privileged_helper(["--certs", "--family", family], log_fn=self.main_window.append_log)
-        GLib.idle_add(self._after_action, ok, "DoW certificates installed into system trust", msg)
+        GLib.idle_add(self._after_action, ok, "DoD certificates installed into system trust", msg)
 
     def on_configure_firefox(self, btn):
         btn.set_sensitive(False)
@@ -266,7 +266,7 @@ class SystemView(Gtk.Box):
     def _run_configure_firefox(self):
         res = configure_all_browsers(log_fn=self.main_window.append_log)
         ok = res.get("firefox_ok", False)
-        GLib.idle_add(self._after_action, ok, "Firefox configured with 'Ask Every Time' and DoW CAC", "")
+        GLib.idle_add(self._after_action, ok, "Firefox configured with 'Ask Every Time' and DoD CAC", "")
 
     def on_configure_chrome(self, btn):
         btn.set_sensitive(False)
