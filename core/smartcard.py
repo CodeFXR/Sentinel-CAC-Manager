@@ -13,6 +13,7 @@ from typing import Optional, List, Dict, Tuple
 from core.rust_bridge import (
     parse_card_certificate_rust,
     parse_pkcs15_list_rust,
+    read_card_certificates_rust,
     is_cac_atr_rust,
 )
 
@@ -36,6 +37,8 @@ class CardCertificate:
     usage: str
     is_valid: bool
     status_text: str
+    raw_der: Optional[bytes] = None
+    ocsp_status: Optional[str] = None
 
 
 @dataclass
@@ -167,9 +170,9 @@ def _parse_x509_text(out_text: str, cert_id: str, label: str, usage: str) -> Car
         if valid_to < now:
             status_text = "Expired"
         elif (valid_to - now).days < 60:
-            status_text = f"Expiring soon ({(valid_to - now).days} days)"
+            status_text = f"Expiring soon ({(valid_to - now).days} days) (Revocation Unchecked)"
         else:
-            status_text = f"Valid through {valid_to.strftime('%b %Y')}"
+            status_text = f"Date Valid through {valid_to.strftime('%b %Y')} (Revocation Unchecked)"
     else:
         status_text = "Unknown Validity"
 
@@ -183,6 +186,15 @@ def _parse_x509_text(out_text: str, cert_id: str, label: str, usage: str) -> Car
 
     # Extract DoD EDIPI & clean Holder Name
     holder_name, edipi = format_dod_cardholder_name(cn)
+
+    if not holder_name:
+        sn_match = re.search(r"serialNumber\s*=\s*([^\s,]+)", subject, re.I)
+        if sn_match:
+            holder_name = f"PIV Credential ({sn_match.group(1)})"
+        elif cn:
+            holder_name = cn
+        else:
+            holder_name = "DoD Smart Card Credential"
 
     if not edipi:
         # Fallback regex for 10-digit DoD EDIPI anywhere in subject
@@ -211,6 +223,13 @@ def _parse_x509_text(out_text: str, cert_id: str, label: str, usage: str) -> Car
 
 def read_card_certificates() -> List[CardCertificate]:
     """Read and parse all X.509 certificates from the inserted CAC with dynamic discovery."""
+    # 1. Primary path: Direct in-process NIST SP 800-73-4 PIV APDU reader via Rust
+    native_certs = read_card_certificates_rust()
+    if native_certs:
+        logger.debug(f"Successfully read {len(native_certs)} certificates via native PIV APDU reader.")
+        return native_certs
+
+    # 2. Secondary path: Fallback to pkcs15-tool if card uses non-PIV applet or native driver is unavailable
     certs: List[CardCertificate] = []
     pkcs15_tool = shutil.which("pkcs15-tool")
     if not pkcs15_tool:
@@ -231,7 +250,7 @@ def read_card_certificates() -> List[CardCertificate]:
         "4": ("CAC Device Authentication", "Device / Card Authentication"),
     }
 
-    # 1. Attempt dynamic certificate enumeration via pkcs15-tool -c
+    # Attempt dynamic certificate enumeration via pkcs15-tool -c
     candidate_ids: List[Tuple[str, str, str]] = []
     try:
         res_list = subprocess.run([pkcs15_tool, "-c"], capture_output=True, text=True, timeout=5)
@@ -296,12 +315,146 @@ def read_card_certificates() -> List[CardCertificate]:
 
             if "subject=" in out:
                 parsed = _parse_x509_text(out, cid, label, usage)
+                parsed.raw_der = raw_der
                 certs.append(parsed)
                 seen_ids.add(cid)
         except Exception as e:
             logger.debug(f"Failed to read certificate {cid}: {e}")
 
     return certs
+
+
+def verify_cert_ocsp(cert: CardCertificate) -> Tuple[Optional[bool], str]:
+    """Verify online certificate revocation status via the OCSP responder in cert's AIA extension.
+
+    Returns:
+        (True, message) if certificate status is confirmed GOOD.
+        (False, message) if certificate status is REVOKED or invalid.
+        (None, message) if OCSP responder is unreachable, offline, or AIA is absent.
+    """
+    if not cert.raw_der:
+        return None, "Raw certificate data unavailable for OCSP check"
+
+    try:
+        import urllib.request
+        import urllib.error
+        from pathlib import Path
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.x509 import ocsp, ExtensionNotFound, AuthorityInformationAccessOID
+    except ImportError as e:
+        return None, f"OCSP cryptography module unavailable: {e}"
+
+    try:
+        # Load X.509 certificate
+        try:
+            x509_cert = x509.load_der_x509_certificate(cert.raw_der)
+        except Exception:
+            x509_cert = x509.load_pem_x509_certificate(cert.raw_der)
+
+        # 1. Extract AIA OCSP URI
+        ocsp_urls: List[str] = []
+        try:
+            aia = x509_cert.extensions.get_extension_for_oid(x509.ExtensionOID.AUTHORITY_INFORMATION_ACCESS)
+            for access_desc in aia.value:
+                if access_desc.access_method == AuthorityInformationAccessOID.OCSP:
+                    ocsp_urls.append(str(access_desc.access_location.value))
+        except ExtensionNotFound:
+            pass
+
+        if not ocsp_urls:
+            return None, "No OCSP responder URL found in Certificate AIA extension"
+
+        ocsp_url = ocsp_urls[0]
+
+        # 2. Match Issuer CA from bundled DoD certificates
+        issuer_cert: Optional[x509.Certificate] = None
+        repo_root = Path(__file__).resolve().parent.parent
+        ca_dirs = [
+            repo_root / "certificates" / "intermediates",
+            repo_root / "certificates" / "roots",
+            repo_root / "certificates" / "all_cas",
+        ]
+
+        target_issuer_name = x509_cert.issuer
+        for d in ca_dirs:
+            if not d.is_dir():
+                continue
+            for cert_file in d.glob("*.crt"):
+                try:
+                    data = cert_file.read_bytes()
+                    cand = x509.load_pem_x509_certificate(data)
+                    if cand.subject == target_issuer_name:
+                        issuer_cert = cand
+                        break
+                except Exception:
+                    continue
+            if issuer_cert:
+                break
+
+        if not issuer_cert:
+            return None, f"Issuer CA certificate not found in local store for {cert.issuer_cn}"
+
+        # 3. Build OCSP Request
+        builder = ocsp.OCSPRequestBuilder()
+        builder = builder.add_certificate(x509_cert, issuer_cert, hashes.SHA256())
+        ocsp_req = builder.build()
+        req_data = ocsp_req.public_bytes(serialization.Encoding.DER)
+
+        # 4. Transmit OCSP Request via HTTP POST
+        req = urllib.request.Request(
+            ocsp_url,
+            data=req_data,
+            headers={
+                "Content-Type": "application/ocsp-request",
+                "Accept": "application/ocsp-response",
+                "User-Agent": "Sentinel-CAC-Manager/1.5.0",
+            },
+        )
+
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            resp_data = resp.read()
+
+        # 5. Parse OCSP Response
+        ocsp_resp = ocsp.load_der_ocsp_response(resp_data)
+        if ocsp_resp.response_status != ocsp.OCSPResponseStatus.SUCCESSFUL:
+            status_name = getattr(ocsp_resp.response_status, "name", str(ocsp_resp.response_status))
+            return None, f"OCSP responder status: {status_name} (May require DoD intranet/VPN)"
+
+        matched_status = None
+        rev_time = None
+        try:
+            for single_resp in ocsp_resp.responses:
+                if single_resp.serial_number == x509_cert.serial_number:
+                    matched_status = single_resp.certificate_status
+                    if hasattr(single_resp, "revocation_time_utc"):
+                        rev_time = single_resp.revocation_time_utc
+                    elif hasattr(single_resp, "revocation_time"):
+                        rev_time = single_resp.revocation_time
+                    break
+        except Exception:
+            matched_status = getattr(ocsp_resp, "certificate_status", None)
+            if hasattr(ocsp_resp, "revocation_time_utc"):
+                rev_time = ocsp_resp.revocation_time_utc
+            elif hasattr(ocsp_resp, "revocation_time"):
+                rev_time = ocsp_resp.revocation_time
+
+        if matched_status == ocsp.OCSPCertStatus.GOOD:
+            return True, "Good (Revocation status confirmed via OCSP)"
+        elif matched_status == ocsp.OCSPCertStatus.REVOKED:
+            time_str = rev_time.strftime("%Y-%m-%d %H:%M:%S UTC") if rev_time else "Unknown"
+            return False, f"REVOKED on {time_str}"
+        elif matched_status == ocsp.OCSPCertStatus.UNKNOWN:
+            return None, "Certificate status unknown to OCSP responder"
+        else:
+            return None, f"OCSP returned status: {matched_status}"
+
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        logger.debug(f"OCSP responder unreachable: {e}")
+        return None, "OCSP responder unreachable (Check network or CAC intranet)"
+    except Exception as e:
+        logger.debug(f"OCSP verification error: {e}")
+        return None, f"OCSP error: {e}"
 
 
 def scan_smartcard() -> SmartCardStatus:

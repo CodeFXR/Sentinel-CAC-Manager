@@ -120,6 +120,7 @@ def parse_card_certificate_rust(
                 valid_to = None
 
         valid_to_display = valid_to.strftime("%Y-%m-%d") if valid_to else (py_cert.valid_to_str or "Unknown")
+        raw_der_bytes = bytes(py_cert.raw_der) if hasattr(py_cert, "raw_der") and py_cert.raw_der else data
 
         return CardCertificate(
             id=py_cert.id,
@@ -137,10 +138,66 @@ def parse_card_certificate_rust(
             usage=py_cert.usage,
             is_valid=py_cert.is_valid,
             status_text=py_cert.status_text,
+            raw_der=raw_der_bytes,
         )
     except Exception as e:
         logger.debug(f"Rust parse_certificate failed for id={cert_id}: {e}")
         return None
+
+
+def read_card_certificates_rust(reader_name: Optional[str] = None) -> List["CardCertificate"]:
+    """Read digital certificates directly via native NIST SP 800-73-4 PIV APDUs.
+
+    Returns a list of populated CardCertificate instances, or an empty list if no card
+    is present, non-PIV card, or if the native module is unavailable.
+    """
+    if not is_rust_available() or not hasattr(_sentinel_core, "read_card_certificates"):
+        return []
+
+    try:
+        from core.smartcard import CardCertificate
+        py_certs = _sentinel_core.read_card_certificates(reader_name)
+        results: List[CardCertificate] = []
+        for py_cert in py_certs:
+            valid_from: Optional[datetime] = None
+            if py_cert.valid_from_str:
+                try:
+                    valid_from = email.utils.parsedate_to_datetime(py_cert.valid_from_str)
+                except Exception:
+                    valid_from = None
+
+            valid_to: Optional[datetime] = None
+            if py_cert.valid_to_str:
+                try:
+                    valid_to = email.utils.parsedate_to_datetime(py_cert.valid_to_str)
+                except Exception:
+                    valid_to = None
+
+            valid_to_display = valid_to.strftime("%Y-%m-%d") if valid_to else (py_cert.valid_to_str or "Unknown")
+            raw_der_bytes = bytes(py_cert.raw_der) if hasattr(py_cert, "raw_der") and py_cert.raw_der else None
+
+            results.append(CardCertificate(
+                id=py_cert.id,
+                label=py_cert.label,
+                subject=py_cert.subject,
+                issuer=py_cert.issuer,
+                issuer_cn=py_cert.issuer_cn,
+                cn=py_cert.cn,
+                holder_name=py_cert.holder_name,
+                edipi=py_cert.edipi,
+                valid_from=valid_from,
+                valid_to=valid_to,
+                valid_to_str=valid_to_display,
+                serial=py_cert.serial,
+                usage=py_cert.usage,
+                is_valid=py_cert.is_valid,
+                status_text=py_cert.status_text,
+                raw_der=raw_der_bytes,
+            ))
+        return results
+    except Exception as e:
+        logger.debug(f"Rust read_card_certificates failed: {e}")
+        return []
 
 
 def parse_pkcs15_list_rust(output: str) -> List[Tuple[str, str]]:

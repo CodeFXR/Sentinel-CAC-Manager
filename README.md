@@ -10,7 +10,7 @@
   <p>
     <img src="https://img.shields.io/badge/Made%20with-GTK4%20%2F%20Libadwaita-00ADD8?style=flat-square" alt="GTK4 Libadwaita" />
     <img src="https://img.shields.io/badge/Language-Python%20%26%20Rust-00ADD8?style=flat-square" alt="Python & Rust" />
-    <img src="https://img.shields.io/badge/Version-v1.4.0-blue?style=flat-square" alt="Version" />
+    <img src="https://img.shields.io/badge/Version-v1.5.0-blue?style=flat-square" alt="Version" />
     <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License" />
   </p>
 
@@ -56,8 +56,8 @@ Configuring a Common Access Card on Linux usually requires orchestrating PC/SC d
 Download the pre-packaged offline release archive from [GitHub Releases](https://github.com/CodeFXR/Sentinel-CAC-Manager/releases):
 
 ```bash
-tar -xzf Sentinel-CAC-Manager-v1.4.0.tar.gz
-cd Sentinel-CAC-Manager-v1.4.0
+tar -xzf Sentinel-CAC-Manager-v1.5.0.tar.gz
+cd Sentinel-CAC-Manager-v1.5.0
 ./install
 ```
 
@@ -120,9 +120,9 @@ Launch Sentinel from your application menu or run `sentinel`. The interface prov
 
 | Limitation | Status | Planned Resolution |
 |---|---|---|
-| On-Card PIN Change | Read-only in v1.4.0 | Planned for Phase 3 (`v1.6.0`) |
-| Background Insert Daemon | Manual/Polled in v1.4.0 | Background event monitor planned for `v1.6.0` |
-| Workstation Login (SSSD/PAM) | Browser/app only in v1.4.0 | OS workstation logon planned for `v2.0.0` |
+| On-Card PIN Change | Read-only in v1.5.0 | Planned for Phase 3 (`v1.6.0`) |
+| Background Insert Daemon | Manual/Polled in v1.5.0 | Background event monitor planned for `v1.6.0` |
+| Workstation Login (SSSD/PAM) | Browser/app only in v1.5.0 | OS workstation logon planned for `v2.0.0` |
 | macOS / Windows Support | Unsupported | Linux only by design |
 
 ## License

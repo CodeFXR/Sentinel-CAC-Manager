@@ -34,6 +34,8 @@ pub struct PyCardCertificate {
     pub is_valid: bool,
     #[pyo3(get)]
     pub status_text: String,
+    #[pyo3(get)]
+    pub raw_der: Vec<u8>,
 }
 
 #[pymethods]
@@ -100,7 +102,18 @@ pub fn parse_der_or_pem_bytes(
         });
 
     // Extract DoD EDIPI & format Holder Name
-    let (holder_name, mut edipi) = format_dod_cn(&cn);
+    let (mut holder_name, mut edipi) = format_dod_cn(&cn);
+
+    if holder_name.is_empty() {
+        let re_sn = Regex::new(r"(?i)serialNumber\s*=\s*([^\s,]+)").unwrap();
+        if let Some(caps) = re_sn.captures(&subject) {
+            holder_name = format!("PIV Credential ({})", &caps[1]);
+        } else if !cn.is_empty() {
+            holder_name = cn.clone();
+        } else {
+            holder_name = "DoD Smart Card Credential".to_string();
+        }
+    }
 
     if edipi.is_empty() {
         let re_edipi = Regex::new(r"\b(\d{10})\b").unwrap();
@@ -130,9 +143,9 @@ pub fn parse_der_or_pem_bytes(
     } else {
         let remaining_days = (not_after_ts - now_ts) / 86400;
         if remaining_days < 60 {
-            format!("Expiring soon ({} days)", remaining_days)
+            format!("Expiring soon ({} days) (Revocation Unchecked)", remaining_days)
         } else {
-            format!("Valid through {}", valid_to_str)
+            format!("Date Valid through {} (Revocation Unchecked)", valid_to_str)
         }
     };
 
@@ -153,6 +166,7 @@ pub fn parse_der_or_pem_bytes(
         usage,
         is_valid,
         status_text,
+        raw_der: der_data,
     })
 }
 

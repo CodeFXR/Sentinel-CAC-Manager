@@ -22,9 +22,9 @@ from cli import _clean_term
 
 class TestRustBridge(unittest.TestCase):
     def test_rust_availability(self):
-        # On systems where Rust is compiled, verify version 1.4.0
+        # On systems where Rust is compiled, verify version 1.5.0
         if is_rust_available():
-            self.assertEqual(get_rust_version(), "1.4.0")
+            self.assertEqual(get_rust_version(), "1.5.0")
         else:
             self.assertIsNone(get_rust_version())
 
@@ -75,6 +75,9 @@ class TestRustBridge(unittest.TestCase):
         self.assertEqual(cert.holder_name, "Jane E Smith")
         self.assertEqual(cert.edipi, "9876543210")
         self.assertTrue(cert.is_valid)
+        self.assertIn("Revocation Unchecked", cert.status_text)
+        self.assertIsNotNone(cert.raw_der)
+        self.assertEqual(len(cert.raw_der), len(der_bytes))
         self.assertIsNotNone(cert.valid_to)
 
     def test_contractor_and_suffix_name_parsing(self):
@@ -110,6 +113,27 @@ class TestRustBridge(unittest.TestCase):
         if status is not None:
             self.assertTrue(status.available)
             self.assertIsInstance(status.readers, list)
+
+    def test_native_piv_apdu_reader(self):
+        from core.rust_bridge import read_card_certificates_rust
+        certs = read_card_certificates_rust()
+        self.assertIsInstance(certs, list)
+        for cert in certs:
+            self.assertIn("Revocation Unchecked", cert.status_text)
+            self.assertTrue(cert.holder_name or cert.cn)
+
+    def test_verify_cert_ocsp_handling(self):
+        from core.smartcard import CardCertificate, verify_cert_ocsp
+        # Certificate with no raw_der
+        dummy = CardCertificate(
+            id="0005", label="Test", subject="Test", issuer="Test", issuer_cn="Test",
+            cn="Test", holder_name="Test", edipi="1234567890", valid_from=None,
+            valid_to=None, valid_to_str="2030-01-01", serial="123", usage="Test",
+            is_valid=True, status_text="Date Valid", raw_der=None
+        )
+        res, msg = verify_cert_ocsp(dummy)
+        self.assertIsNone(res)
+        self.assertIn("unavailable", msg)
 
 
 class TestCliSanitization(unittest.TestCase):

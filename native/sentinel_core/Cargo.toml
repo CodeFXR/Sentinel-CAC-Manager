@@ -1,6 +1,6 @@
 [package]
 name = "sentinel_core"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
 description = "High-performance cryptographic and hardware accelerator for Sentinel CAC Manager"
 license = "MIT"
@@ -15,3 +15,4 @@ x509-parser = "0.16"
 regex = "1.10"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 libloading = "0.8"
+flate2 = "1.1.10"

@@ -1,12 +1,13 @@
 """Smart Card Certificates View (ActivClient Certificate Explorer) for Sentinel v2."""
 
+import threading
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
 
-from core.smartcard import SmartCardStatus
+from core.smartcard import SmartCardStatus, verify_cert_ocsp
 
 
 class CardsView(Gtk.Box):
@@ -116,6 +117,46 @@ class CardsView(Gtk.Box):
 
             sub_usage = Adw.ActionRow(title="Key Usage and Purpose", subtitle=GLib.markup_escape_text(cert.usage or "General Purpose"))
             row.add_row(sub_usage)
+
+            # Revocation status row with on-demand OCSP verification
+            sub_revoc = Adw.ActionRow(
+                title="Revocation Status",
+                subtitle="Date Valid (Revocation Unchecked)",
+            )
+            btn_ocsp = Gtk.Button(label="Check OCSP")
+            btn_ocsp.add_css_class("flat")
+            btn_ocsp.set_valign(Gtk.Align.CENTER)
+
+            def make_ocsp_handler(target_cert, action_row, button):
+                def on_click(_btn):
+                    button.set_sensitive(False)
+                    button.set_label("Checking...")
+
+                    def worker():
+                        res, msg = verify_cert_ocsp(target_cert)
+
+                        def update_ui():
+                            action_row.set_subtitle(GLib.markup_escape_text(msg))
+                            if res is True:
+                                button.set_label("Good")
+                                button.add_css_class("suggested-action")
+                            elif res is False:
+                                button.set_label("Revoked")
+                                button.add_css_class("destructive-action")
+                            else:
+                                button.set_label("Retry OCSP")
+                                button.set_sensitive(True)
+                            return False
+
+                        GLib.idle_add(update_ui)
+
+                    threading.Thread(target=worker, daemon=True).start()
+
+                return on_click
+
+            btn_ocsp.connect("clicked", make_ocsp_handler(cert, sub_revoc, btn_ocsp))
+            sub_revoc.add_suffix(btn_ocsp)
+            row.add_row(sub_revoc)
 
             certs_group.add(row)
 

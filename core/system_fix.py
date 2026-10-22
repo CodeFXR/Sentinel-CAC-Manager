@@ -137,12 +137,22 @@ def run_privileged_helper(
             proc.wait(timeout=3)
         except Exception:
             pass
+        if proc.stdout:
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
         return False, f"Authorization or elevated execution timed out after {timeout} seconds."
 
     try:
         proc.wait(timeout=5)
     except Exception:
         pass
+    if proc.stdout:
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
 
     if proc.returncode == 0:
         return True, "\n".join(output_lines)
