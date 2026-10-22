@@ -73,6 +73,44 @@ class CardsView(Gtk.Box):
         )
         self.content_box.append(header_group)
 
+        # PIN & Verification Group
+        pin_group = Adw.PreferencesGroup()
+        pin_group.set_title("PIV Card Security & PIN")
+        pin_group.set_description("NIST SP 800-73-4 Cardholder Verification status:")
+
+        pin_row = Adw.ActionRow(title="PIV PIN Status")
+        if card_stat.pin_locked:
+            pin_row.set_subtitle("PIN is LOCKED. Contact servicing RAPIDS/DEERS ID card facility.")
+            pin_badge = Gtk.Label(label="LOCKED")
+            pin_badge.add_css_class("badge-danger")
+        elif card_stat.pin_retries_remaining is not None:
+            pin_row.set_subtitle(f"{card_stat.pin_retries_remaining} verification attempts remaining before card lockout.")
+            pin_badge = Gtk.Label(label=f"{card_stat.pin_retries_remaining} Retries")
+            if card_stat.pin_retries_remaining >= 3:
+                pin_badge.add_css_class("badge-success")
+            elif card_stat.pin_retries_remaining > 1:
+                pin_badge.add_css_class("badge-warning")
+            else:
+                pin_badge.add_css_class("badge-danger")
+        else:
+            msg = card_stat.pin_status_msg or "Status unverified"
+            pin_row.set_subtitle(GLib.markup_escape_text(msg))
+            pin_badge = Gtk.Label(label="Unchecked")
+            pin_badge.add_css_class("badge-info")
+
+        pin_row.add_suffix(pin_badge)
+
+        btn_change_pin = Gtk.Button(label="Change PIN...")
+        btn_change_pin.set_valign(Gtk.Align.CENTER)
+        btn_change_pin.add_css_class("suggested-action")
+        if card_stat.pin_locked:
+            btn_change_pin.set_sensitive(False)
+        btn_change_pin.connect("clicked", lambda _: self._show_change_pin_dialog(card_stat))
+        pin_row.add_suffix(btn_change_pin)
+
+        pin_group.add(pin_row)
+        self.content_box.append(pin_group)
+
         # List Certificates
         certs_group = Adw.PreferencesGroup()
         certs_group.set_title("On-Card Digital Certificates")
@@ -161,3 +199,136 @@ class CardsView(Gtk.Box):
             certs_group.add(row)
 
         self.content_box.append(certs_group)
+
+    def _show_change_pin_dialog(self, card_stat: SmartCardStatus):
+        dialog = Adw.Window(title="Change PIV Card PIN", modal=True, transient_for=self.main_window)
+        dialog.set_default_size(440, 420)
+
+        header = Adw.HeaderBar()
+        header.set_show_end_title_buttons(True)
+
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        main_box.append(header)
+
+        clamp = Adw.Clamp()
+        clamp.set_maximum_size(400)
+        clamp.set_margin_start(16)
+        clamp.set_margin_end(16)
+        clamp.set_margin_bottom(24)
+
+        form_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+
+        info_label = Gtk.Label(
+            label="PIV PINs must consist of 6 to 8 numeric digits. Please ensure the current PIN is entered accurately.",
+            wrap=True,
+            xalign=0,
+        )
+        info_label.add_css_class("dim-label")
+        form_box.append(info_label)
+
+        group = Adw.PreferencesGroup()
+        current_pin_row = Adw.PasswordEntryRow(title="Current PIN")
+        new_pin_row = Adw.PasswordEntryRow(title="New PIN (6-8 digits)")
+        confirm_pin_row = Adw.PasswordEntryRow(title="Confirm New PIN")
+
+        group.add(current_pin_row)
+        group.add(new_pin_row)
+        group.add(confirm_pin_row)
+        form_box.append(group)
+
+        status_label = Gtk.Label(label="", wrap=True, xalign=0)
+        status_label.set_visible(False)
+        form_box.append(status_label)
+
+        spinner = Gtk.Spinner()
+        spinner.set_visible(False)
+        spinner.set_halign(Gtk.Align.CENTER)
+        form_box.append(spinner)
+
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        btn_box.set_halign(Gtk.Align.END)
+        btn_box.set_margin_top(8)
+
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda _: dialog.close())
+
+        submit_btn = Gtk.Button(label="Update PIN")
+        submit_btn.add_css_class("suggested-action")
+
+        def on_submit(_btn):
+            curr_pin = current_pin_row.get_text().strip()
+            new_pin = new_pin_row.get_text().strip()
+            confirm_pin = confirm_pin_row.get_text().strip()
+
+            if not curr_pin:
+                status_label.set_text("Please enter your current PIN.")
+                status_label.add_css_class("error-label")
+                status_label.set_visible(True)
+                return
+
+            if not (6 <= len(new_pin) <= 8 and new_pin.isdigit()):
+                status_label.set_text("New PIN must be 6 to 8 numeric digits.")
+                status_label.add_css_class("error-label")
+                status_label.set_visible(True)
+                return
+
+            if new_pin != confirm_pin:
+                status_label.set_text("New PIN and confirmation PIN do not match.")
+                status_label.add_css_class("error-label")
+                status_label.set_visible(True)
+                return
+
+            if curr_pin == new_pin:
+                status_label.set_text("New PIN must be different from current PIN.")
+                status_label.add_css_class("error-label")
+                status_label.set_visible(True)
+                return
+
+            status_label.set_visible(False)
+            submit_btn.set_sensitive(False)
+            cancel_btn.set_sensitive(False)
+            current_pin_row.set_sensitive(False)
+            new_pin_row.set_sensitive(False)
+            confirm_pin_row.set_sensitive(False)
+            spinner.set_visible(True)
+            spinner.start()
+
+            def worker():
+                from core.smartcard import change_card_pin
+                ok, retries, msg = change_card_pin(curr_pin, new_pin, card_stat.reader_name)
+
+                def on_done():
+                    spinner.stop()
+                    spinner.set_visible(False)
+                    if ok:
+                        dialog.close()
+                        self.main_window.show_toast("PIV PIN updated successfully.")
+                        self.main_window.refresh_all_status()
+                    else:
+                        submit_btn.set_sensitive(True)
+                        cancel_btn.set_sensitive(True)
+                        current_pin_row.set_sensitive(True)
+                        new_pin_row.set_sensitive(True)
+                        confirm_pin_row.set_sensitive(True)
+                        current_pin_row.set_text("")
+                        new_pin_row.set_text("")
+                        confirm_pin_row.set_text("")
+                        status_label.set_text(f"PIN change failed: {msg}")
+                        status_label.add_css_class("error-label")
+                        status_label.set_visible(True)
+                        self.main_window.refresh_all_status()
+                    return False
+
+                GLib.idle_add(on_done)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        submit_btn.connect("clicked", on_submit)
+        btn_box.append(cancel_btn)
+        btn_box.append(submit_btn)
+        form_box.append(btn_box)
+
+        clamp.set_child(form_box)
+        main_box.append(clamp)
+        dialog.set_content(main_box)
+        dialog.present()

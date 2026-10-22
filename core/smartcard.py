@@ -51,6 +51,9 @@ class SmartCardStatus:
     token_label: Optional[str]
     token_serial: Optional[str]
     certificates: List[CardCertificate]
+    pin_retries_remaining: Optional[int] = None
+    pin_locked: bool = False
+    pin_status_msg: Optional[str] = None
 
     @property
     def primary_certificate(self) -> Optional[CardCertificate]:
@@ -554,6 +557,18 @@ def scan_smartcard() -> SmartCardStatus:
             certificates = read_card_certificates()
             if certificates and cache_key:
                 _CERT_CACHE[cache_key] = certificates
+
+    pin_retries_remaining: Optional[int] = None
+    pin_locked: bool = False
+    pin_status_msg: Optional[str] = None
+
+    if card_present:
+        from core.rust_bridge import query_pin_status_rust
+        ok, retries, msg = query_pin_status_rust(reader_name)
+        if ok or retries > 0 or (msg and "locked" in msg.lower()):
+            pin_retries_remaining = retries
+            pin_locked = (retries == 0)
+            pin_status_msg = msg
     else:
         # Clear cache when reader is empty
         _CERT_CACHE.clear()
@@ -567,4 +582,16 @@ def scan_smartcard() -> SmartCardStatus:
         token_label=token_label,
         token_serial=token_serial,
         certificates=certificates,
+        pin_retries_remaining=pin_retries_remaining,
+        pin_locked=pin_locked,
+        pin_status_msg=pin_status_msg,
     )
+
+
+def change_card_pin(old_pin: str, new_pin: str, reader_name: Optional[str] = None) -> Tuple[bool, int, str]:
+    """Change PIV Cardholder PIN on inserted smart card via native APDUs.
+
+    Returns: (is_success, retries_remaining, status_message)
+    """
+    from core.rust_bridge import change_pin_rust
+    return change_pin_rust(old_pin, new_pin, reader_name)

@@ -160,6 +160,13 @@ class DashboardView(Gtk.Box):
         self.cert_status_row.set_subtitle("—")
         self.id_group.add(self.cert_status_row)
 
+        self.pin_status_row = Adw.ActionRow(title="PIV PIN Status")
+        self.pin_status_row.set_subtitle("—")
+        self.pin_badge = Gtk.Label(label="—")
+        self.pin_badge.add_css_class("badge-info")
+        self.pin_status_row.add_suffix(self.pin_badge)
+        self.id_group.add(self.pin_status_row)
+
         self.container.append(self.id_group)
 
     def update_status(self, card_stat: SmartCardStatus, system_ready: bool):
@@ -220,6 +227,38 @@ class DashboardView(Gtk.Box):
             self.holder_row.set_subtitle("Insert CAC into reader to read identity")
             self.edipi_row.set_subtitle("—")
             self.cert_status_row.set_subtitle("—")
+
+        # Update PIN Status
+        if card_stat.card_present:
+            self.pin_badge.remove_css_class("badge-info")
+            self.pin_badge.remove_css_class("badge-success")
+            self.pin_badge.remove_css_class("badge-warning")
+            self.pin_badge.remove_css_class("badge-danger")
+            if card_stat.pin_locked:
+                self.pin_status_row.set_subtitle("PIN is LOCKED (Contact ID Card Facility)")
+                self.pin_badge.set_label("LOCKED")
+                self.pin_badge.add_css_class("badge-danger")
+            elif card_stat.pin_retries_remaining is not None:
+                self.pin_status_row.set_subtitle(f"{card_stat.pin_retries_remaining} verification attempts remaining")
+                self.pin_badge.set_label(f"{card_stat.pin_retries_remaining} Retries")
+                if card_stat.pin_retries_remaining >= 3:
+                    self.pin_badge.add_css_class("badge-success")
+                elif card_stat.pin_retries_remaining > 1:
+                    self.pin_badge.add_css_class("badge-warning")
+                else:
+                    self.pin_badge.add_css_class("badge-danger")
+            else:
+                msg = card_stat.pin_status_msg or "Status unverified"
+                self.pin_status_row.set_subtitle(GLib.markup_escape_text(msg))
+                self.pin_badge.set_label("Unchecked")
+                self.pin_badge.add_css_class("badge-info")
+        else:
+            self.pin_status_row.set_subtitle("—")
+            self.pin_badge.set_label("—")
+            self.pin_badge.remove_css_class("badge-success")
+            self.pin_badge.remove_css_class("badge-warning")
+            self.pin_badge.remove_css_class("badge-danger")
+            self.pin_badge.add_css_class("badge-info")
 
     def on_master_setup_clicked(self, button):
         self.master_btn.set_sensitive(False)

@@ -73,6 +73,12 @@ def cmd_status():
         print(f"  Cardholder Name:       {_clean_term(card_stat.primary_certificate.holder_name if card_stat.primary_certificate else None)}")
         print(f"  EDIPI / DoD ID:        {_clean_term(card_stat.primary_certificate.edipi if card_stat.primary_certificate else None)}")
         print(f"  ATR:                   {_clean_term(card_stat.atr, 'N/A')}")
+        if card_stat.pin_locked:
+            print("  PIN Status:            [LOCKED] (Contact servicing ID Card facility)")
+        elif card_stat.pin_retries_remaining is not None:
+            print(f"  PIN Status:            {card_stat.pin_retries_remaining} verification retries remaining")
+        elif card_stat.pin_status_msg:
+            print(f"  PIN Status:            {_clean_term(card_stat.pin_status_msg)}")
         print(f"  On-Card Certificates:  {len(card_stat.certificates)}")
         for c in card_stat.certificates:
             print(f"    * [{_clean_term(c.id)}] {_clean_term(c.label)}: Issuer: {_clean_term(c.issuer_cn)} | {_clean_term(c.status_text)}")
@@ -91,6 +97,12 @@ def cmd_card_info():
     print(f"Card Model:      {_clean_term(card_stat.card_name, 'Unknown')}")
     print(f"Token Serial:    {_clean_term(card_stat.token_serial, 'Unknown')}")
     print(f"Token Label:     {_clean_term(card_stat.token_label, 'Unknown')}")
+    if card_stat.pin_locked:
+        print("PIN Status:      [LOCKED] (RAPIDS/DEERS unblock required)")
+    elif card_stat.pin_retries_remaining is not None:
+        print(f"PIN Status:      {card_stat.pin_retries_remaining} retries remaining")
+    elif card_stat.pin_status_msg:
+        print(f"PIN Status:      {_clean_term(card_stat.pin_status_msg)}")
     print(f"\n--- Certificates ({len(card_stat.certificates)}) ---")
     for c in card_stat.certificates:
         print(f"  Object ID:     {_clean_term(c.id, 'N/A')}")
@@ -121,12 +133,99 @@ def cmd_setup() -> bool:
         return False
 
 
+def cmd_pin_status() -> int:
+    from core.smartcard import scan_smartcard
+    card_stat = scan_smartcard()
+    if not card_stat.card_present:
+        print("[-] No smart card detected in reader.")
+        return 1
+    if card_stat.pin_locked:
+        print("[-] PIV PIN is LOCKED. Cardholder must visit a RAPIDS/DEERS facility to unblock.")
+        return 2
+    if card_stat.pin_retries_remaining is not None:
+        print(f"[+] PIV PIN verification retries remaining: {card_stat.pin_retries_remaining}")
+        return 0
+    print(f"[-] PIN status unverified: {card_stat.pin_status_msg or 'Communication failure'}")
+    return 1
+
+
+def cmd_change_pin() -> bool:
+    import getpass
+    from core.smartcard import scan_smartcard, change_card_pin
+
+    card_stat = scan_smartcard()
+    if not card_stat.card_present:
+        print("[-] No smart card detected in reader.")
+        return False
+
+    if card_stat.pin_locked:
+        print("[-] PIV PIN is LOCKED. Cardholder must visit a RAPIDS/DEERS facility to unblock.")
+        return False
+
+    if card_stat.pin_retries_remaining is not None:
+        print(f"[*] Card detected with {card_stat.pin_retries_remaining} verification retries remaining.")
+
+    try:
+        curr_pin = getpass.getpass("Enter current PIV PIN: ").strip()
+        if not curr_pin:
+            print("[-] Error: Current PIN cannot be empty.")
+            return False
+
+        new_pin = getpass.getpass("Enter new PIV PIN (6-8 digits): ").strip()
+        if not (6 <= len(new_pin) <= 8 and new_pin.isdigit()):
+            print("[-] Error: PIV PIN must be 6 to 8 numeric digits.")
+            return False
+
+        if curr_pin == new_pin:
+            print("[-] Error: New PIN must be different from current PIN.")
+            return False
+
+        confirm_pin = getpass.getpass("Confirm new PIV PIN: ").strip()
+        if new_pin != confirm_pin:
+            print("[-] Error: Confirmation PIN does not match.")
+            return False
+    except (KeyboardInterrupt, EOFError):
+        print("\nAborted.")
+        return False
+
+    print("[*] Transmitting CHANGE REFERENCE DATA APDU to smart card...")
+    ok, retries, msg = change_card_pin(curr_pin, new_pin, card_stat.reader_name)
+    if ok:
+        print(f"[+] SUCCESS: {msg}")
+        return True
+    else:
+        print(f"[-] FAILED: {msg}")
+        return False
+
+
+def cmd_agent():
+    from core.agent import run_agent
+    print("[*] Starting Sentinel background event monitor...")
+    print("[*] Monitoring reader insertion and removal events (Ctrl+C to exit)...")
+    run_agent()
+
+
+def cmd_install_agent() -> bool:
+    from core.agent import install_systemd_user_service
+    print("[*] Configuring user systemd daemon for Sentinel...")
+    ok, msg = install_systemd_user_service(log_fn=print)
+    if ok:
+        print(f"[+] SUCCESS: {msg}")
+    else:
+        print(f"[-] FAILED: {msg}")
+    return ok
+
+
 def main():
     parser = argparse.ArgumentParser(description="Sentinel CAC Manager - Automated DoD CAC Manager for Linux")
     parser.add_argument("--version", "-v", action="version", version=f"Sentinel CAC Manager v{__version__}")
     parser.add_argument("--status", "--check", action="store_true", help="display system and card status")
     parser.add_argument("--setup-all", "--automate", action="store_true", help="run full automated setup")
     parser.add_argument("--card-info", action="store_true", help="display details of inserted smart card")
+    parser.add_argument("--pin-status", action="store_true", help="display PIV PIN verification retry counter")
+    parser.add_argument("--change-pin", action="store_true", help="interactively change PIV smart card PIN")
+    parser.add_argument("--agent", action="store_true", help="run background smart card event monitor daemon")
+    parser.add_argument("--install-agent", action="store_true", help="install and enable user systemd service for agent")
     parser.add_argument("--browsers", action="store_true", help="configure Firefox and Chrome browsers only")
     parser.add_argument("--certs", action="store_true", help="install DoD certificates only")
     parser.add_argument("--reader-fix", action="store_true", help="apply Broadcom reader hang fix only")
@@ -173,6 +272,18 @@ def main():
     elif args.card_info:
         cmd_card_info()
         sys.exit(0)
+    elif args.pin_status:
+        rc = cmd_pin_status()
+        sys.exit(rc)
+    elif args.change_pin:
+        ok = cmd_change_pin()
+        sys.exit(0 if ok else 1)
+    elif args.agent:
+        cmd_agent()
+        sys.exit(0)
+    elif args.install_agent:
+        ok = cmd_install_agent()
+        sys.exit(0 if ok else 1)
     elif args.browsers:
         from core.browsers import configure_all_browsers
         print("Configuring browsers...")

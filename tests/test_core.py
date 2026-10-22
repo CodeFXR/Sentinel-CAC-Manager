@@ -22,9 +22,9 @@ from cli import _clean_term
 
 class TestRustBridge(unittest.TestCase):
     def test_rust_availability(self):
-        # On systems where Rust is compiled, verify version 1.5.0
+        # On systems where Rust is compiled, verify version 1.6.0
         if is_rust_available():
-            self.assertEqual(get_rust_version(), "1.5.0")
+            self.assertEqual(get_rust_version(), "1.6.0")
         else:
             self.assertIsNone(get_rust_version())
 
@@ -351,6 +351,80 @@ class TestSubprocessTimeoutHandling(unittest.TestCase):
         finally:
             if os.path.exists(sleep_script):
                 os.remove(sleep_script)
+
+
+class TestVersionConsistency(unittest.TestCase):
+    def test_version_matches(self):
+        import core
+        self.assertEqual(core.__version__, "1.6.0")
+
+
+class TestPinManagement(unittest.TestCase):
+    def test_pin_validation_rules(self):
+        from core.rust_bridge import change_pin_rust
+        # Same PIN
+        ok, retries, msg = change_pin_rust("123456", "123456")
+        self.assertFalse(ok)
+        self.assertIn("must be different", msg)
+
+        # Short current PIN
+        ok, retries, msg = change_pin_rust("12345", "123456")
+        self.assertFalse(ok)
+        self.assertIn("6 to 8 numeric digits", msg)
+
+        # Alpha current PIN
+        ok, retries, msg = change_pin_rust("abcdef", "123456")
+        self.assertFalse(ok)
+        self.assertIn("6 to 8 numeric digits", msg)
+
+        # Alpha new PIN
+        ok, retries, msg = change_pin_rust("123456", "abcdef")
+        self.assertFalse(ok)
+        self.assertIn("6 to 8 numeric digits", msg)
+
+    def test_query_pin_status_types(self):
+        from core.rust_bridge import query_pin_status_rust
+        ok, retries, msg = query_pin_status_rust()
+        self.assertIsInstance(ok, bool)
+        self.assertIsInstance(retries, int)
+        self.assertIsInstance(msg, str)
+
+
+class TestAgentDaemon(unittest.TestCase):
+    def test_send_desktop_notification_mock(self):
+        from unittest.mock import patch
+        from core.agent import send_desktop_notification
+
+        with patch("shutil.which", return_value="/usr/bin/notify-send"), \
+             patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            ok = send_desktop_notification("Test Title", "Test Body", urgency="low")
+            self.assertTrue(ok)
+            mock_run.assert_called_once()
+            call_args = mock_run.call_args[0][0]
+            self.assertIn("Test Title", call_args)
+            self.assertIn("Test Body", call_args)
+
+    def test_systemd_user_service_install_uninstall(self):
+        import tempfile
+        import os
+        from unittest.mock import patch
+        from core.agent import install_systemd_user_service, uninstall_systemd_user_service
+
+        with tempfile.TemporaryDirectory() as tmp_home:
+            with patch("shutil.which", return_value=None):
+                ok, msg = install_systemd_user_service(home_dir=tmp_home)
+                self.assertTrue(ok)
+                service_file = os.path.join(tmp_home, ".config", "systemd", "user", "sentinel-agent.service")
+                self.assertTrue(os.path.isfile(service_file))
+                with open(service_file, "r") as f:
+                    content = f.read()
+                    self.assertIn("Description=Sentinel CAC Manager Card Monitor Daemon", content)
+                    self.assertIn("ExecStart=%h/.local/bin/sentinel-cac-manager --agent", content)
+
+                un_ok, un_msg = uninstall_systemd_user_service(home_dir=tmp_home)
+                self.assertTrue(un_ok)
+                self.assertFalse(os.path.isfile(service_file))
 
 
 if __name__ == "__main__":

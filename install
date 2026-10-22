@@ -203,6 +203,12 @@ if [ "${1:-}" = "--uninstall" ]; then
     fi
 fi
 
+# 6. Handle agent installation mode (--install-agent)
+if [ "${1:-}" = "--install-agent" ]; then
+    python3 "${SCRIPT_DIR}/cli.py" --install-agent
+    exit $?
+fi
+
 # 7. Handle internal --install-deps elevation target
 if [ "${1:-}" = "--install-deps" ]; then
     if [ "$EUID" -ne 0 ]; then
@@ -432,5 +438,7 @@ echo "================================================================="
 echo "   Installation Complete!"
 echo "   Launch GUI:     sentinel"
 echo "   Command Line:   sentinel --status"
+echo "   PIN Status:     sentinel --pin-status"
 echo "   Full Setup:     sentinel --setup-all"
+echo "   Monitor Agent:  sentinel --install-agent"
 echo "================================================================="

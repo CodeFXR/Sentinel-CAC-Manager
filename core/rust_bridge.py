@@ -258,6 +258,56 @@ def query_native_pcsc_rust():
     return None
 
 
+def query_pin_status_rust(reader_name: Optional[str] = None) -> Tuple[bool, int, str]:
+    """Query PIV cardholder PIN retry counter non-destructively.
+
+    Returns: (is_success, retries_remaining, status_message)
+    """
+    if is_rust_available() and hasattr(_sentinel_core, "query_pin_status"):
+        try:
+            ok, retries, msg = _sentinel_core.query_pin_status(reader_name)
+            return ok, int(retries), str(msg)
+        except Exception as e:
+            logger.debug(f"Rust query_pin_status failed: {e}")
+            return False, 0, f"PIN query failure: {e}"
+    return False, 0, "Native smart card engine unavailable"
+
+
+def change_pin_rust(old_pin: str, new_pin: str, reader_name: Optional[str] = None) -> Tuple[bool, int, str]:
+    """Change PIV cardholder PIN on inserted smart card via native APDUs.
+
+    Returns: (is_success, retries_remaining, status_message)
+    """
+    if old_pin == new_pin:
+        return False, 0, "New PIN must be different from current PIN"
+    if len(old_pin) < 6 or len(old_pin) > 8 or not old_pin.isdigit():
+        return False, 0, "Current PIN must be 6 to 8 numeric digits"
+    if len(new_pin) < 6 or len(new_pin) > 8 or not new_pin.isdigit():
+        return False, 0, "New PIN must be 6 to 8 numeric digits"
+
+    if is_rust_available() and hasattr(_sentinel_core, "change_pin"):
+        try:
+            ok, retries, msg = _sentinel_core.change_pin(old_pin, new_pin, reader_name)
+            return ok, int(retries), str(msg)
+        except Exception as e:
+            logger.debug(f"Rust change_pin failed: {e}")
+            return False, 0, f"PIN change failure: {e}"
+    return False, 0, "Native smart card engine unavailable"
+
+
+def wait_for_card_event_rust(timeout_ms: int = 3000) -> Optional[Tuple[str, bool]]:
+    """Block waiting for a smart card insertion or removal event.
+
+    Returns (reader_name, is_card_present) on state change, or None on timeout.
+    """
+    if is_rust_available() and hasattr(_sentinel_core, "wait_for_card_event"):
+        try:
+            return _sentinel_core.wait_for_card_event(timeout_ms)
+        except Exception as e:
+            logger.debug(f"Rust wait_for_card_event failed: {e}")
+    return None
+
+
 class _PyPinBuffer:
     """Pure-Python fallback for secure PIN storage with zeroization on drop."""
 

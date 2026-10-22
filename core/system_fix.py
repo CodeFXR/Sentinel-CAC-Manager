@@ -492,6 +492,12 @@ def uninstall_desktop_integration(
     if shutil.which("update-desktop-database") and os.path.isdir(app_dir):
         subprocess.run(["update-desktop-database", app_dir], capture_output=True)
 
+    try:
+        from core.agent import uninstall_systemd_user_service
+        uninstall_systemd_user_service(home_dir=home, log_fn=log_fn)
+    except Exception as e:
+        logger.debug(f"Could not cleanly uninstall user service: {e}")
+
     msg = f"Removed {removed_count} user desktop and launcher items."
     if log_fn:
         log_fn(msg)

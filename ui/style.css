@@ -253,3 +253,9 @@ checkbutton:checked label {
     font-size: 14px;
     font-weight: 600;
 }
+
+.error-label {
+    color: #ef4444;
+    font-size: 13px;
+    font-weight: 600;
+}

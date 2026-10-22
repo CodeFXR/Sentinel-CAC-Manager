@@ -3,15 +3,15 @@ use pyo3::prelude::*;
 use regex::Regex;
 use std::ffi::{c_char, c_void, CString};
 
-pub const SCARD_SCOPE_SYSTEM: u32 = 2;
-pub const SCARD_SCOPE_USER: u32 = 0;
-pub const SCARD_SHARE_SHARED: u32 = 2;
-pub const SCARD_PROTOCOL_T0: u32 = 1;
-pub const SCARD_PROTOCOL_T1: u32 = 2;
-pub const SCARD_LEAVE_CARD: u32 = 0;
+pub const SCARD_SCOPE_SYSTEM: usize = 2;
+pub const SCARD_SCOPE_USER: usize = 0;
+pub const SCARD_SHARE_SHARED: usize = 2;
+pub const SCARD_PROTOCOL_T0: usize = 1;
+pub const SCARD_PROTOCOL_T1: usize = 2;
+pub const SCARD_LEAVE_CARD: usize = 0;
 pub const SCARD_S_SUCCESS: i64 = 0;
-pub const SCARD_STATE_UNAWARE: u32 = 0x0000;
-pub const SCARD_STATE_PRESENT: u32 = 0x0020;
+pub const SCARD_STATE_UNAWARE: usize = 0x0000;
+pub const SCARD_STATE_PRESENT: usize = 0x0020;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -25,14 +25,14 @@ pub struct SCARD_IO_REQUEST {
 pub struct SCARD_READERSTATE {
     pub sz_reader: *const c_char,
     pub pv_user_data: *mut c_void,
-    pub dw_current_state: u32,
-    pub dw_event_state: u32,
-    pub cb_atr: u32,
+    pub dw_current_state: usize,
+    pub dw_event_state: usize,
+    pub cb_atr: usize,
     pub rgb_atr: [u8; 33],
 }
 
 type SCardEstablishContextFn = unsafe extern "C" fn(
-    scope: u32,
+    scope: usize,
     r1: *const c_void,
     r2: *const c_void,
     ph_context: *mut i64,
@@ -44,35 +44,35 @@ type SCardListReadersFn = unsafe extern "C" fn(
     h_context: i64,
     msz_groups: *const c_char,
     msz_readers: *mut c_char,
-    pcch_readers: *mut u32,
+    pcch_readers: *mut usize,
 ) -> i64;
 
 type SCardGetStatusChangeFn = unsafe extern "C" fn(
     h_context: i64,
-    dw_timeout: u32,
+    dw_timeout: usize,
     rg_reader_states: *mut SCARD_READERSTATE,
-    c_readers: u32,
+    c_readers: usize,
 ) -> i64;
 
 type SCardConnectFn = unsafe extern "C" fn(
     h_context: i64,
     sz_reader: *const c_char,
-    dw_share_mode: u32,
-    dw_preferred_protocols: u32,
+    dw_share_mode: usize,
+    dw_preferred_protocols: usize,
     ph_card: *mut i64,
-    pdw_active_protocol: *mut u32,
+    pdw_active_protocol: *mut usize,
 ) -> i64;
 
-type SCardDisconnectFn = unsafe extern "C" fn(h_card: i64, dw_disposition: u32) -> i64;
+type SCardDisconnectFn = unsafe extern "C" fn(h_card: i64, dw_disposition: usize) -> i64;
 
 type SCardTransmitFn = unsafe extern "C" fn(
     h_card: i64,
     pio_send_pci: *const SCARD_IO_REQUEST,
     pb_send_buffer: *const u8,
-    cb_send_length: u32,
+    cb_send_length: usize,
     pio_recv_pci: *mut SCARD_IO_REQUEST,
     pb_recv_buffer: *mut u8,
-    pcb_recv_length: *mut u32,
+    pcb_recv_length: *mut usize,
 ) -> i64;
 
 struct PcscSymbols {
@@ -218,7 +218,7 @@ pub fn query_native_pcsc_status() -> PyNativePcscStatus {
     };
 
     // Context established -> pcscd is running
-    let mut cch: u32 = 0;
+    let mut cch: usize = 0;
     let list_rc = unsafe {
         (symbols.list_readers)(
             context,
@@ -230,7 +230,7 @@ pub fn query_native_pcsc_status() -> PyNativePcscStatus {
 
     let mut readers = Vec::new();
     if list_rc == SCARD_S_SUCCESS && cch > 0 {
-        let mut buf = vec![0u8; cch as usize];
+        let mut buf = vec![0u8; cch];
         let list_rc2 = unsafe {
             (symbols.list_readers)(
                 context,
@@ -415,22 +415,22 @@ pub fn extract_cert_from_piv_container(payload: &[u8]) -> Option<Vec<u8>> {
 fn transmit_apdu(
     transmit_fn: SCardTransmitFn,
     h_card: i64,
-    active_proto: u32,
+    active_proto: usize,
     apdu: &[u8],
 ) -> Result<Vec<u8>, i64> {
     let pci = SCARD_IO_REQUEST {
-        dw_protocol: active_proto as usize,
+        dw_protocol: active_proto,
         cb_pci_length: std::mem::size_of::<SCARD_IO_REQUEST>(),
     };
     let mut recv_buf = vec![0u8; 4096];
-    let mut recv_len: u32 = recv_buf.len() as u32;
+    let mut recv_len: usize = recv_buf.len();
 
     let rc = unsafe {
         transmit_fn(
             h_card,
             &pci,
             apdu.as_ptr(),
-            apdu.len() as u32,
+            apdu.len(),
             std::ptr::null_mut(),
             recv_buf.as_mut_ptr(),
             &mut recv_len,
@@ -440,14 +440,14 @@ fn transmit_apdu(
     if rc != SCARD_S_SUCCESS {
         return Err(rc);
     }
-    recv_buf.truncate(recv_len as usize);
+    recv_buf.truncate(recv_len);
     Ok(recv_buf)
 }
 
 fn read_piv_container_data(
     transmit_fn: SCardTransmitFn,
     h_card: i64,
-    active_proto: u32,
+    active_proto: usize,
     tag: [u8; 3],
 ) -> Option<Vec<u8>> {
     // GET DATA APDU: 00 CB 3F FF 05 5C 03 [tag0] [tag1] [tag2] 00
@@ -554,69 +554,12 @@ pub fn read_piv_certificates_native(reader_opt: Option<&str>) -> Vec<crate::cert
     };
 
     // Determine target reader
-    let target_reader = if let Some(r) = reader_opt {
-        r.to_string()
-    } else {
-        let mut cch: u32 = 0;
-        let list_rc = unsafe {
-            (symbols.list_readers)(context, std::ptr::null(), std::ptr::null_mut(), &mut cch)
-        };
-        if list_rc != SCARD_S_SUCCESS || cch == 0 {
+    let target_reader = match resolve_target_reader(&symbols, context, reader_opt) {
+        Some(r) => r,
+        None => {
             unsafe { (symbols.release_context)(context); }
             return results;
         }
-        let mut buf = vec![0u8; cch as usize];
-        let list_rc2 = unsafe {
-            (symbols.list_readers)(context, std::ptr::null(), buf.as_mut_ptr() as *mut c_char, &mut cch)
-        };
-        if list_rc2 != SCARD_S_SUCCESS {
-            unsafe { (symbols.release_context)(context); }
-            return results;
-        }
-
-        let mut readers = Vec::new();
-        let mut start = 0;
-        for i in 0..buf.len() {
-            if buf[i] == 0 {
-                if i > start {
-                    if let Ok(s) = std::str::from_utf8(&buf[start..i]) {
-                        let trimmed = s.trim();
-                        if !trimmed.is_empty() {
-                            readers.push(trimmed.to_string());
-                        }
-                    }
-                }
-                start = i + 1;
-            }
-        }
-
-        if readers.is_empty() {
-            unsafe { (symbols.release_context)(context); }
-            return results;
-        }
-
-        // Search for reader with card present
-        let mut selected = readers[0].clone();
-        for r_name in &readers {
-            if let Ok(c_name) = CString::new(r_name.as_str()) {
-                let mut state = SCARD_READERSTATE {
-                    sz_reader: c_name.as_ptr(),
-                    pv_user_data: std::ptr::null_mut(),
-                    dw_current_state: SCARD_STATE_UNAWARE,
-                    dw_event_state: 0,
-                    cb_atr: 0,
-                    rgb_atr: [0u8; 33],
-                };
-                let st_rc = unsafe {
-                    (symbols.get_status_change)(context, 0, &mut state, 1)
-                };
-                if st_rc == SCARD_S_SUCCESS && (state.dw_event_state & SCARD_STATE_PRESENT) != 0 {
-                    selected = r_name.clone();
-                    break;
-                }
-            }
-        }
-        selected
     };
 
     let c_reader = match CString::new(target_reader.as_str()) {
@@ -628,7 +571,7 @@ pub fn read_piv_certificates_native(reader_opt: Option<&str>) -> Vec<crate::cert
     };
 
     let mut h_card: i64 = 0;
-    let mut active_proto: u32 = 0;
+    let mut active_proto: usize = 0;
     let conn_rc = unsafe {
         connect_fn(
             context,
@@ -701,6 +644,439 @@ pub fn read_piv_certificates_native(reader_opt: Option<&str>) -> Vec<crate::cert
     results
 }
 
+fn get_reader_list(symbols: &PcscSymbols, context: i64) -> Vec<String> {
+    let mut cch: usize = 0;
+    let list_rc = unsafe {
+        (symbols.list_readers)(context, std::ptr::null(), std::ptr::null_mut(), &mut cch)
+    };
+    if list_rc != SCARD_S_SUCCESS || cch == 0 {
+        return Vec::new();
+    }
+    let mut buf = vec![0u8; cch];
+    let list_rc2 = unsafe {
+        (symbols.list_readers)(context, std::ptr::null(), buf.as_mut_ptr() as *mut c_char, &mut cch)
+    };
+    if list_rc2 != SCARD_S_SUCCESS {
+        return Vec::new();
+    }
+
+    let mut readers = Vec::new();
+    let mut start = 0;
+    for i in 0..buf.len() {
+        if buf[i] == 0 {
+            if i > start {
+                if let Ok(s) = std::str::from_utf8(&buf[start..i]) {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        readers.push(trimmed.to_string());
+                    }
+                }
+            }
+            start = i + 1;
+        }
+    }
+    readers
+}
+
+fn resolve_target_reader(symbols: &PcscSymbols, context: i64, reader_opt: Option<&str>) -> Option<String> {
+    if let Some(r) = reader_opt {
+        return Some(r.to_string());
+    }
+    let readers = get_reader_list(symbols, context);
+    if readers.is_empty() {
+        return None;
+    }
+    let mut selected = readers[0].clone();
+    for r_name in &readers {
+        if let Ok(c_name) = CString::new(r_name.as_str()) {
+            let mut state = SCARD_READERSTATE {
+                sz_reader: c_name.as_ptr(),
+                pv_user_data: std::ptr::null_mut(),
+                dw_current_state: SCARD_STATE_UNAWARE,
+                dw_event_state: 0,
+                cb_atr: 0,
+                rgb_atr: [0u8; 33],
+            };
+            let st_rc = unsafe {
+                (symbols.get_status_change)(context, 0, &mut state, 1)
+            };
+            if st_rc == SCARD_S_SUCCESS && (state.dw_event_state & SCARD_STATE_PRESENT) != 0 {
+                selected = r_name.clone();
+                break;
+            }
+        }
+    }
+    Some(selected)
+}
+
+/// Queries the PIV cardholder PIN retry counter non-destructively.
+///
+/// Sends an empty VERIFY APDU (00 20 00 80) to Key Reference 0x80 (PIV Cardholder PIN).
+///
+/// Returns: (is_success, retries_remaining, status_message)
+pub fn query_piv_pin_status(reader_opt: Option<&str>) -> (bool, u8, String) {
+    let symbols = match PcscSymbols::try_load() {
+        Some(s) => s,
+        None => return (false, 0, "PC/SC Lite library unavailable".to_string()),
+    };
+
+    let (connect_fn, disconnect_fn, transmit_fn) = match (symbols.connect, symbols.disconnect, symbols.transmit) {
+        (Some(c), Some(d), Some(t)) => (c, d, t),
+        _ => return (false, 0, "PC/SC smart card functions unavailable".to_string()),
+    };
+
+    let mut context: i64 = 0;
+    let rc = unsafe {
+        (symbols.establish_context)(SCARD_SCOPE_SYSTEM, std::ptr::null(), std::ptr::null(), &mut context)
+    };
+    let context = if rc == SCARD_S_SUCCESS {
+        context
+    } else {
+        let rc_user = unsafe {
+            (symbols.establish_context)(SCARD_SCOPE_USER, std::ptr::null(), std::ptr::null(), &mut context)
+        };
+        if rc_user != SCARD_S_SUCCESS {
+            return (false, 0, "Failed to establish PC/SC context".to_string());
+        }
+        context
+    };
+
+    let target_reader = match resolve_target_reader(&symbols, context, reader_opt) {
+        Some(r) => r,
+        None => {
+            unsafe { (symbols.release_context)(context); }
+            return (false, 0, "No smart card reader with inserted card found".to_string());
+        }
+    };
+
+    let c_reader = match CString::new(target_reader.as_str()) {
+        Ok(c) => c,
+        Err(_) => {
+            unsafe { (symbols.release_context)(context); }
+            return (false, 0, "Invalid reader name".to_string());
+        }
+    };
+
+    let mut h_card: i64 = 0;
+    let mut active_proto: usize = 0;
+    let conn_rc = unsafe {
+        connect_fn(
+            context,
+            c_reader.as_ptr(),
+            SCARD_SHARE_SHARED,
+            SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1,
+            &mut h_card,
+            &mut active_proto,
+        )
+    };
+
+    if conn_rc != SCARD_S_SUCCESS {
+        unsafe { (symbols.release_context)(context); }
+        return (false, 0, "Failed to connect to smart card".to_string());
+    }
+
+    // Select PIV Application
+    let piv_aid = [0x00, 0xA4, 0x04, 0x00, 0x09, 0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00];
+    let _ = transmit_apdu(transmit_fn, h_card, active_proto, &piv_aid);
+
+    // Send empty VERIFY APDU to query retry counter without consuming an attempt
+    let verify_empty = [0x00, 0x20, 0x00, 0x80];
+    let resp = match transmit_apdu(transmit_fn, h_card, active_proto, &verify_empty) {
+        Ok(r) => r,
+        Err(e) => {
+            unsafe {
+                disconnect_fn(h_card, SCARD_LEAVE_CARD);
+                (symbols.release_context)(context);
+            }
+            return (false, 0, format!("APDU transmit failure: error {e}"));
+        }
+    };
+
+    unsafe {
+        disconnect_fn(h_card, SCARD_LEAVE_CARD);
+        (symbols.release_context)(context);
+    }
+
+    if resp.len() < 2 {
+        return (false, 0, "Invalid response from smart card".to_string());
+    }
+
+    let sw1 = resp[resp.len() - 2];
+    let sw2 = resp[resp.len() - 1];
+
+    if sw1 == 0x90 && sw2 == 0x00 {
+        (true, 3, "PIN verified (Active session)".to_string())
+    } else if sw1 == 0x63 && (sw2 & 0xF0) == 0xC0 {
+        let retries = sw2 & 0x0F;
+        if retries == 0 {
+            (false, 0, "PIN locked (0 attempts remaining)".to_string())
+        } else {
+            (true, retries, format!("{retries} attempt(s) remaining"))
+        }
+    } else if sw1 == 0x69 && sw2 == 0x83 {
+        (false, 0, "Authentication method blocked (PIN locked)".to_string())
+    } else {
+        (false, 0, format!("Card returned status {sw1:02X} {sw2:02X}"))
+    }
+}
+
+/// Changes the PIV Cardholder PIN on the smart card via CHANGE REFERENCE DATA (00 24 00 80).
+///
+/// Parameters:
+/// - old_pin: Current 6-8 digit PIN
+/// - new_pin: New 6-8 digit PIN
+///
+/// Returns: (is_success, retries_remaining, status_message)
+pub fn change_piv_pin_native(
+    reader_opt: Option<&str>,
+    old_pin: &str,
+    new_pin: &str,
+) -> (bool, u8, String) {
+    if old_pin.len() < 6 || old_pin.len() > 8 || !old_pin.chars().all(|c| c.is_ascii_digit()) {
+        return (false, 0, "Current PIN must be 6 to 8 numeric digits".to_string());
+    }
+    if new_pin.len() < 6 || new_pin.len() > 8 || !new_pin.chars().all(|c| c.is_ascii_digit()) {
+        return (false, 0, "New PIN must be 6 to 8 numeric digits".to_string());
+    }
+    if old_pin == new_pin {
+        return (false, 0, "New PIN must be different from current PIN".to_string());
+    }
+
+    use zeroize::Zeroize;
+    let mut old_buf = [0xFFu8; 8];
+    let mut new_buf = [0xFFu8; 8];
+
+    for (i, b) in old_pin.as_bytes().iter().enumerate() {
+        old_buf[i] = *b;
+    }
+    for (i, b) in new_pin.as_bytes().iter().enumerate() {
+        new_buf[i] = *b;
+    }
+
+    let symbols = match PcscSymbols::try_load() {
+        Some(s) => s,
+        None => {
+            old_buf.zeroize();
+            new_buf.zeroize();
+            return (false, 0, "PC/SC Lite library unavailable".to_string());
+        }
+    };
+
+    let (connect_fn, disconnect_fn, transmit_fn) = match (symbols.connect, symbols.disconnect, symbols.transmit) {
+        (Some(c), Some(d), Some(t)) => (c, d, t),
+        _ => {
+            old_buf.zeroize();
+            new_buf.zeroize();
+            return (false, 0, "PC/SC smart card functions unavailable".to_string());
+        }
+    };
+
+    let mut context: i64 = 0;
+    let rc = unsafe {
+        (symbols.establish_context)(SCARD_SCOPE_SYSTEM, std::ptr::null(), std::ptr::null(), &mut context)
+    };
+    let context = if rc == SCARD_S_SUCCESS {
+        context
+    } else {
+        let rc_user = unsafe {
+            (symbols.establish_context)(SCARD_SCOPE_USER, std::ptr::null(), std::ptr::null(), &mut context)
+        };
+        if rc_user != SCARD_S_SUCCESS {
+            old_buf.zeroize();
+            new_buf.zeroize();
+            return (false, 0, "Failed to establish PC/SC context".to_string());
+        }
+        context
+    };
+
+    let target_reader = match resolve_target_reader(&symbols, context, reader_opt) {
+        Some(r) => r,
+        None => {
+            unsafe { (symbols.release_context)(context); }
+            old_buf.zeroize();
+            new_buf.zeroize();
+            return (false, 0, "No smart card reader with inserted card found".to_string());
+        }
+    };
+
+    let c_reader = match CString::new(target_reader.as_str()) {
+        Ok(c) => c,
+        Err(_) => {
+            unsafe { (symbols.release_context)(context); }
+            old_buf.zeroize();
+            new_buf.zeroize();
+            return (false, 0, "Invalid reader name".to_string());
+        }
+    };
+
+    let mut h_card: i64 = 0;
+    let mut active_proto: usize = 0;
+    let conn_rc = unsafe {
+        connect_fn(
+            context,
+            c_reader.as_ptr(),
+            SCARD_SHARE_SHARED,
+            SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1,
+            &mut h_card,
+            &mut active_proto,
+        )
+    };
+
+    if conn_rc != SCARD_S_SUCCESS {
+        unsafe { (symbols.release_context)(context); }
+        old_buf.zeroize();
+        new_buf.zeroize();
+        return (false, 0, "Failed to connect to smart card".to_string());
+    }
+
+    // Select PIV Application
+    let piv_aid = [0x00, 0xA4, 0x04, 0x00, 0x09, 0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00];
+    let _ = transmit_apdu(transmit_fn, h_card, active_proto, &piv_aid);
+
+    // Build CHANGE REFERENCE DATA APDU:
+    // CLA=00, INS=24, P1=00, P2=80, Lc=10, old_buf(8), new_buf(8)
+    let mut change_apdu = [0u8; 21];
+    change_apdu[0] = 0x00;
+    change_apdu[1] = 0x24;
+    change_apdu[2] = 0x00;
+    change_apdu[3] = 0x80;
+    change_apdu[4] = 0x10;
+    change_apdu[5..13].copy_from_slice(&old_buf);
+    change_apdu[13..21].copy_from_slice(&new_buf);
+
+    old_buf.zeroize();
+    new_buf.zeroize();
+
+    let resp = match transmit_apdu(transmit_fn, h_card, active_proto, &change_apdu) {
+        Ok(r) => {
+            change_apdu.zeroize();
+            r
+        }
+        Err(e) => {
+            change_apdu.zeroize();
+            unsafe {
+                disconnect_fn(h_card, SCARD_LEAVE_CARD);
+                (symbols.release_context)(context);
+            }
+            return (false, 0, format!("APDU transmit failure: error {e}"));
+        }
+    };
+
+    unsafe {
+        disconnect_fn(h_card, SCARD_LEAVE_CARD);
+        (symbols.release_context)(context);
+    }
+
+    if resp.len() < 2 {
+        return (false, 0, "Invalid response from smart card".to_string());
+    }
+
+    let sw1 = resp[resp.len() - 2];
+    let sw2 = resp[resp.len() - 1];
+
+    if sw1 == 0x90 && sw2 == 0x00 {
+        (true, 3, "PIN changed successfully".to_string())
+    } else if sw1 == 0x63 && (sw2 & 0xF0) == 0xC0 {
+        let retries = sw2 & 0x0F;
+        (false, retries, format!("Incorrect current PIN ({retries} attempt(s) remaining)"))
+    } else if sw1 == 0x69 && sw2 == 0x83 {
+        (false, 0, "PIN blocked (0 attempts remaining)".to_string())
+    } else if sw1 == 0x6A && sw2 == 0x80 {
+        (false, 0, "New PIN rejected by smart card policy".to_string())
+    } else {
+        (false, 0, format!("Card returned status {sw1:02X} {sw2:02X}"))
+    }
+}
+
+/// Blocks waiting for a smart card insertion or removal event.
+///
+/// Returns Option<(reader_name, is_card_present)>:
+/// - Some((reader, true)): Card was just inserted.
+/// - Some((reader, false)): Card was just removed.
+/// - None: Timeout expired with no state change, or error.
+pub fn wait_for_smartcard_event(timeout_ms: u32) -> Option<(String, bool)> {
+    let symbols = PcscSymbols::try_load()?;
+
+    let mut context: i64 = 0;
+    let rc = unsafe {
+        (symbols.establish_context)(SCARD_SCOPE_SYSTEM, std::ptr::null(), std::ptr::null(), &mut context)
+    };
+    let context = if rc == SCARD_S_SUCCESS {
+        context
+    } else {
+        let rc_user = unsafe {
+            (symbols.establish_context)(SCARD_SCOPE_USER, std::ptr::null(), std::ptr::null(), &mut context)
+        };
+        if rc_user != SCARD_S_SUCCESS {
+            return None;
+        }
+        context
+    };
+
+    let readers = get_reader_list(&symbols, context);
+    if readers.is_empty() {
+        unsafe { (symbols.release_context)(context); }
+        std::thread::sleep(std::time::Duration::from_millis(timeout_ms.min(1000) as u64));
+        return None;
+    }
+
+    let mut reader_cstrings: Vec<CString> = Vec::new();
+    let mut states: Vec<SCARD_READERSTATE> = Vec::new();
+
+    for r_name in &readers {
+        if let Ok(c_name) = CString::new(r_name.as_str()) {
+            reader_cstrings.push(c_name);
+        }
+    }
+
+    for c_name in &reader_cstrings {
+        states.push(SCARD_READERSTATE {
+            sz_reader: c_name.as_ptr(),
+            pv_user_data: std::ptr::null_mut(),
+            dw_current_state: SCARD_STATE_UNAWARE,
+            dw_event_state: 0,
+            cb_atr: 0,
+            rgb_atr: [0u8; 33],
+        });
+    }
+
+    let init_rc = unsafe {
+        (symbols.get_status_change)(context, 0, states.as_mut_ptr(), states.len())
+    };
+
+    if init_rc != SCARD_S_SUCCESS {
+        unsafe { (symbols.release_context)(context); }
+        return None;
+    }
+
+    for state in states.iter_mut() {
+        state.dw_current_state = state.dw_event_state;
+    }
+
+    let wait_rc = unsafe {
+        (symbols.get_status_change)(context, timeout_ms as usize, states.as_mut_ptr(), states.len())
+    };
+
+    if wait_rc != SCARD_S_SUCCESS {
+        unsafe { (symbols.release_context)(context); }
+        return None;
+    }
+
+    let mut event = None;
+    for (i, state) in states.iter().enumerate() {
+        let changed = (state.dw_event_state & 0x0002) != 0; // SCARD_STATE_CHANGED
+        if changed {
+            let present = (state.dw_event_state & SCARD_STATE_PRESENT) != 0;
+            let reader_name = readers.get(i).cloned().unwrap_or_default();
+            event = Some((reader_name, present));
+            break;
+        }
+    }
+
+    unsafe { (symbols.release_context)(context); }
+    event
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,6 +1092,35 @@ mod tests {
     fn test_native_pcsc_query_does_not_crash() {
         let status = query_native_pcsc_status();
         println!("PC/SC status: {:?}", status);
+    }
+
+    #[test]
+    fn test_pin_change_validation() {
+        // Non-numeric rejected
+        let (ok, _, msg) = change_piv_pin_native(None, "abcdef", "123456");
+        assert!(!ok);
+        assert!(msg.contains("numeric"));
+
+        // Too short (< 6)
+        let (ok, _, msg) = change_piv_pin_native(None, "12345", "123456");
+        assert!(!ok);
+        assert!(msg.contains("6 to 8"));
+
+        // Too long (> 8)
+        let (ok, _, msg) = change_piv_pin_native(None, "123456789", "123456");
+        assert!(!ok);
+        assert!(msg.contains("6 to 8"));
+
+        // Same PIN rejected
+        let (ok, _, msg) = change_piv_pin_native(None, "123456", "123456");
+        assert!(!ok);
+        assert!(msg.contains("different"));
+    }
+
+    #[test]
+    fn test_query_piv_pin_status_no_crash() {
+        let (ok, retries, msg) = query_piv_pin_status(None);
+        println!("PIN status query result: ok={} retries={} msg='{}'", ok, retries, msg);
     }
 
     #[test]
