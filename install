@@ -88,12 +88,43 @@ case "${FAMILY}" in
         ;;
 esac
 
-# 4. Handle internal --install-deps elevation target
-if [ "${1:-}" = "--install-deps" ]; then
-    if [ "$EUID" -ne 0 ]; then
-        echo "[-] Error: --install-deps requires root privileges." >&2
-        exit 1
+# 4. Elevated staging runner to eliminate TOCTOU execution hazards
+elevate_exec() {
+    local stage_cmd
+    # shellcheck disable=SC2016
+    stage_cmd=$(printf 'STG=$(mktemp -d /tmp/sentinel_stage.XXXXXX) && chown root:root "$STG" && chmod 700 "$STG" && cp -a %q "$STG/src" && chown -R root:root "$STG/src" && bash "$STG/src/install" "$@"; RC=$?; rm -rf "$STG"; exit $RC' "${SCRIPT_DIR}")
+    if [ -t 0 ]; then
+        sudo bash -c "$stage_cmd" _ "$@"
+    elif command -v pkexec >/dev/null 2>&1 && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+        pkexec bash -c "$stage_cmd" _ "$@"
+    else
+        local launched=0
+        local cmd_str
+        cmd_str=$(printf 'sudo bash -c %q _ %q; echo "Press Enter to continue..."; read -r' "$stage_cmd" "$*")
+        for term in x-terminal-emulator gnome-terminal ptyxis konsole xfce4-terminal mate-terminal alacritty kitty foot xterm; do
+            if command -v "$term" >/dev/null 2>&1; then
+                case "$term" in
+                    gnome-terminal|mate-terminal|xfce4-terminal|ptyxis)
+                        "$term" -- bash -c "$cmd_str"
+                        launched=1
+                        break
+                        ;;
+                    *)
+                        "$term" -e bash -c "$cmd_str"
+                        launched=1
+                        break
+                        ;;
+                esac
+            fi
+        done
+        if [ "$launched" -eq 0 ]; then
+            sudo bash -c "$stage_cmd" _ "$@"
+        fi
     fi
+}
+
+# 5. Core privileged dependency and trust setup routine
+install_system_deps_and_certs() {
     echo "[+] Updating package index and installing dependencies for ${FAMILY}..."
     case "${FAMILY}" in
         debian)
@@ -105,10 +136,10 @@ if [ "${1:-}" = "--install-deps" ]; then
             dnf install -y --setopt=install_weak_deps=False "${REQUIRED_PKGS[@]}"
             ;;
         arch)
-            pacman -Sy --noconfirm "${REQUIRED_PKGS[@]}"
+            pacman -S --needed --noconfirm "${REQUIRED_PKGS[@]}"
             ;;
         suse)
-            zypper install -y "${REQUIRED_PKGS[@]}"
+            zypper --non-interactive install "${REQUIRED_PKGS[@]}"
             ;;
     esac
 
@@ -117,7 +148,7 @@ if [ "${1:-}" = "--install-deps" ]; then
         systemctl enable --now pcscd.socket pcscd 2>/dev/null || true
     fi
 
-    # Deploy protected privileged helper
+    # Deploy protected privileged helper to /usr/libexec/sentinel/ (0755 root:root)
     echo "[+] Deploying protected privileged helper to /usr/libexec/sentinel/..."
     mkdir -p /usr/libexec/sentinel
     cp -f "${SCRIPT_DIR}/core/privileged_helper.py" /usr/libexec/sentinel/privileged_helper.py
@@ -137,7 +168,7 @@ if [ "${1:-}" = "--install-deps" ]; then
         fi
 
         # Install system certificates into trust store via validated privileged helper
-        python3 /usr/libexec/sentinel/privileged_helper.py --certs --family "${FAMILY}" --certs-dir /usr/share/sentinel/certificates || true
+        python3 /usr/libexec/sentinel/privileged_helper.py --certs --family "${FAMILY}" --certs-dir /usr/share/sentinel/certificates
     fi
 
     # Reset smart card ATR if card present
@@ -146,6 +177,39 @@ if [ "${1:-}" = "--install-deps" ]; then
     fi
 
     echo "[+] Dependencies and system trust successfully configured."
+}
+
+# 6. Handle uninstallation mode (--uninstall)
+if [ "${1:-}" = "--uninstall" ]; then
+    echo "================================================================="
+    echo "   Sentinel CAC Manager - Uninstallation & Trust Rollback"
+    echo "================================================================="
+    if [ "$EUID" -ne 0 ]; then
+        echo "[*] Requesting administrator authorization to remove system trust and policies..."
+        elevate_exec --uninstall
+        # Also clean user integration
+        python3 "${SCRIPT_DIR}/cli.py" --uninstall 2>/dev/null || true
+        echo "[+] Uninstallation complete."
+        exit 0
+    else
+        if [ -f "/usr/libexec/sentinel/privileged_helper.py" ]; then
+            python3 /usr/libexec/sentinel/privileged_helper.py --uninstall --family "${FAMILY}"
+        elif [ -f "${SCRIPT_DIR}/core/privileged_helper.py" ]; then
+            python3 "${SCRIPT_DIR}/core/privileged_helper.py" --uninstall --family "${FAMILY}"
+        fi
+        rm -rf /usr/share/sentinel
+        echo "[+] System trust and middleware configuration rolled back successfully."
+        exit 0
+    fi
+fi
+
+# 7. Handle internal --install-deps elevation target
+if [ "${1:-}" = "--install-deps" ]; then
+    if [ "$EUID" -ne 0 ]; then
+        echo "[-] Error: --install-deps requires root privileges." >&2
+        exit 1
+    fi
+    install_system_deps_and_certs
     exit 0
 fi
 
@@ -191,48 +255,7 @@ fi
 if [ "$NEEDS_ROOT" -eq 1 ]; then
     if [ "$EUID" -eq 0 ]; then
         echo "[+] Running as root. Installing core system dependencies..."
-        case "${FAMILY}" in
-            debian)
-                export DEBIAN_FRONTEND=noninteractive
-                apt-get update -qq || true
-                apt-get install -y --no-install-recommends "${REQUIRED_PKGS[@]}"
-                ;;
-            fedora)
-                dnf install -y --setopt=install_weak_deps=False "${REQUIRED_PKGS[@]}"
-                ;;
-            arch)
-                pacman -Sy --noconfirm "${REQUIRED_PKGS[@]}"
-                ;;
-            suse)
-                zypper install -y "${REQUIRED_PKGS[@]}"
-                ;;
-        esac
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl enable --now pcscd.socket pcscd 2>/dev/null || true
-        fi
-        mkdir -p /usr/libexec/sentinel
-        cp -f "${SCRIPT_DIR}/core/privileged_helper.py" /usr/libexec/sentinel/privileged_helper.py
-        chmod 0755 /usr/libexec/sentinel/privileged_helper.py
-
-        if [ -d "${SCRIPT_DIR}/certificates" ]; then
-            echo "[+] Deploying DoD CA certificates to /usr/share/sentinel/certificates/..."
-            mkdir -p /usr/share/sentinel/certificates
-            cp -rf "${SCRIPT_DIR}/certificates/"* /usr/share/sentinel/certificates/
-            chmod -R 0644 /usr/share/sentinel/certificates/* 2>/dev/null || true
-            find /usr/share/sentinel/certificates -type d -exec chmod 0755 {} + 2>/dev/null || true
-
-            # Clean legacy dow trust store if present
-            if [ -d /usr/local/share/ca-certificates/dow ]; then
-                rm -rf /usr/local/share/ca-certificates/dow
-            fi
-
-            # Install system certificates into trust store via validated privileged helper
-            python3 /usr/libexec/sentinel/privileged_helper.py --certs --family "${FAMILY}" --certs-dir /usr/share/sentinel/certificates || true
-        fi
-
-        if command -v opensc-tool >/dev/null 2>&1; then
-            opensc-tool --reset warm 2>/dev/null || true
-        fi
+        install_system_deps_and_certs
     else
         echo "================================================================="
         echo "   Sentinel CAC Manager - System Dependency Setup"
@@ -245,34 +268,7 @@ if [ "$NEEDS_ROOT" -eq 1 ]; then
             echo ""
         fi
         echo "[*] Administrator privileges (sudo) are required to install dependencies."
-
-        if [ -t 0 ]; then
-            sudo "${SCRIPT_DIR}/install" --install-deps
-        elif command -v pkexec >/dev/null 2>&1 && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
-            pkexec "${SCRIPT_DIR}/install" --install-deps
-        else
-            LAUNCHED=0
-            CMD_STR=$(printf 'sudo %q --install-deps; echo "Press Enter to continue..."; read -r' "${SCRIPT_DIR}/install")
-            for term in x-terminal-emulator gnome-terminal ptyxis konsole xfce4-terminal mate-terminal alacritty kitty foot xterm; do
-                if command -v "$term" >/dev/null 2>&1; then
-                    case "$term" in
-                        gnome-terminal|mate-terminal|xfce4-terminal|ptyxis)
-                            "$term" -- bash -c "$CMD_STR"
-                            LAUNCHED=1
-                            break
-                            ;;
-                        konsole|alacritty|kitty|foot|x-terminal-emulator|xterm|*)
-                            "$term" -e bash -c "$CMD_STR"
-                            LAUNCHED=1
-                            break
-                            ;;
-                    esac
-                fi
-            done
-            if [ "$LAUNCHED" -eq 0 ]; then
-                sudo "${SCRIPT_DIR}/install" --install-deps
-            fi
-        fi
+        elevate_exec --install-deps
     fi
 fi
 
@@ -337,15 +333,26 @@ if [ -f "${ICON_SRC}" ]; then
     echo "[+] Installed app icon to ${ICON_DIR}/sentinel_cac_manager.png"
 fi
 
-# 11. Create launcher wrappers and symlinks in ~/.local/bin
+# 11. Create launcher wrappers in ~/.local/bin
 printf '#!/usr/bin/env bash\nexec python3 %q "$@"\n' "${SCRIPT_DIR}/sentinel_cac_manager.py" > "${BIN_DIR}/sentinel-cac-manager"
 chmod +x "${BIN_DIR}/sentinel-cac-manager"
-ln -sf "${BIN_DIR}/sentinel-cac-manager" "${BIN_DIR}/sentinel"
-ln -sf "${BIN_DIR}/sentinel-cac-manager" "${BIN_DIR}/sentinel-v2"
+
+# Safely manage sentinel symlink without clobbering third-party tools
+if [ -L "${BIN_DIR}/sentinel" ]; then
+    rm -f "${BIN_DIR}/sentinel"
+    ln -sf "${BIN_DIR}/sentinel-cac-manager" "${BIN_DIR}/sentinel"
+elif [ ! -e "${BIN_DIR}/sentinel" ]; then
+    ln -sf "${BIN_DIR}/sentinel-cac-manager" "${BIN_DIR}/sentinel"
+fi
+
+# Clean legacy developer symlinks
+rm -f "${BIN_DIR}/sentinel-v2" "${BIN_DIR}/sentinel2"
+
 echo "[+] Created executable commands:"
 echo "    - ${BIN_DIR}/sentinel-cac-manager"
-echo "    - ${BIN_DIR}/sentinel"
-echo "    - ${BIN_DIR}/sentinel-v2"
+if [ -L "${BIN_DIR}/sentinel" ]; then
+    echo "    - ${BIN_DIR}/sentinel"
+fi
 
 # 12. Install desktop launcher (FreeDesktop argument escaping applied)
 
@@ -381,7 +388,7 @@ Type=Application
 Categories=Utility;Security;
 Keywords=CAC;PIV;DoD;SmartCard;Military;Security;Authentication;
 StartupNotify=true
-StartupWMClass=mil.dod.sentinel_cac_manager
+StartupWMClass=com.codefxr.sentinel_cac_manager
 EOF
 chmod +x "${APP_DIR}/sentinel_cac_manager.desktop"
 rm -f "${APP_DIR}/sentinel_v2.desktop"
@@ -400,7 +407,10 @@ fi
 
 # Ensure user ownership if run under sudo
 if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
-    chown "${SUDO_USER}:" "${BIN_DIR}/sentinel-cac-manager" "${BIN_DIR}/sentinel" "${BIN_DIR}/sentinel-v2" "${APP_DIR}/sentinel_cac_manager.desktop" 2>/dev/null || true
+    chown "${SUDO_USER}:" "${BIN_DIR}/sentinel-cac-manager" "${APP_DIR}/sentinel_cac_manager.desktop" 2>/dev/null || true
+    if [ -L "${BIN_DIR}/sentinel" ]; then
+        chown -h "${SUDO_USER}:" "${BIN_DIR}/sentinel" 2>/dev/null || true
+    fi
     if [ -f "${ICON_DIR}/sentinel_cac_manager.png" ]; then
         chown "${SUDO_USER}:" "${ICON_DIR}/sentinel_cac_manager.png" 2>/dev/null || true
     fi

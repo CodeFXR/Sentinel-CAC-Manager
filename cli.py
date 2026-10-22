@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import sys
 from typing import Optional
 
 from core import __version__
@@ -103,7 +104,7 @@ def cmd_card_info():
         print("  " + "-" * 40)
 
 
-def cmd_setup():
+def cmd_setup() -> bool:
     from core.system_fix import run_full_setup
 
     print("Initiating Full Automated DoD CAC Setup...")
@@ -114,8 +115,10 @@ def cmd_setup():
     if res["success"]:
         print("\nSUCCESS: DoD CAC setup completed successfully!")
         print("Open Firefox or Chrome and navigate to your .mil portal.")
+        return True
     else:
         print(f"\nFAILED: {res['message']}")
+        return False
 
 
 def main():
@@ -129,6 +132,7 @@ def main():
     parser.add_argument("--reader-fix", action="store_true", help="apply Broadcom reader hang fix only")
     parser.add_argument("--gui", action="store_true", help="launch graphical interface")
     parser.add_argument("--installer", action="store_true", help="launch graphical setup wizard")
+    parser.add_argument("--uninstall", action="store_true", help="revert system changes and uninstall Sentinel")
 
     args = parser.parse_args()
 
@@ -136,53 +140,68 @@ def main():
         try:
             from ui.installer_window import run_installer_gui
             run_installer_gui()
+            sys.exit(0)
         except (ImportError, ValueError) as err:
             print(f"[-] Error: Could not launch setup wizard ({err}).")
             print("[-] Required GUI libraries (GTK4 / Libadwaita / PyGObject) are not installed.")
             print("[-] Run './install' to install all system dependencies.")
-        return
+            sys.exit(1)
 
     if args.gui:
         try:
             from ui.app import run_gui
             run_gui()
+            sys.exit(0)
         except (ImportError, ValueError) as err:
             print(f"[-] Error: Could not launch GUI ({err}).")
             print("[-] Required GUI libraries (GTK4 / Libadwaita / PyGObject) are not installed.")
             print("[-] Run './install' to install all system dependencies.")
-        return
+            sys.exit(1)
 
     print_banner()
 
-    if args.setup_all:
-        cmd_setup()
+    if args.uninstall:
+        from core.system_fix import run_full_uninstall
+        ok = run_full_uninstall(log_callback=print)
+        sys.exit(0 if ok else 1)
+    elif args.setup_all:
+        ok = cmd_setup()
+        sys.exit(0 if ok else 1)
     elif args.status:
         cmd_status()
+        sys.exit(0)
     elif args.card_info:
         cmd_card_info()
+        sys.exit(0)
     elif args.browsers:
         from core.browsers import configure_all_browsers
         print("Configuring browsers...")
-        configure_all_browsers(log_fn=print)
+        res = configure_all_browsers(log_fn=print)
+        sys.exit(0 if not res.get("errors") else 1)
     elif args.certs:
         from core.platform_detector import detect_platform
         from core.system_fix import run_privileged_helper
         plat = detect_platform()
-        run_privileged_helper(["--certs", "--family", plat.family], log_fn=print)
+        ok, _ = run_privileged_helper(["--certs", "--family", plat.family], log_fn=print)
+        sys.exit(0 if ok else 1)
     elif args.reader_fix:
         from core.system_fix import run_privileged_helper
-        run_privileged_helper(["--reader-fix"], log_fn=print)
+        ok, _ = run_privileged_helper(["--reader-fix"], log_fn=print)
+        sys.exit(0 if ok else 1)
     else:
         # Default when run without args in terminal: show status or launch GUI if DISPLAY is available
         if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
             try:
                 from ui.app import run_gui
                 run_gui()
+                sys.exit(0)
             except Exception as e:
                 print(f"Could not initialize GUI ({e}). Falling back to CLI status:\n")
                 cmd_status()
+                sys.exit(0)
         else:
             cmd_status()
+            sys.exit(0)
 
 
 if __name__ == "__main__":

@@ -1,72 +1,130 @@
 <div align="center">
-  <img src="sentinel_cac_manager.png" alt="Sentinel CAC Manager" width="220" />
+  <img src="sentinel_cac_manager.png" alt="sentinel_cac_manager_icon" width="220" />
 
   <h1>Sentinel CAC Manager</h1>
 
   <p>
-    <strong>Graphical interface for configuring smart cards on Linux.</strong>
+    <strong>Automated Common Access Card (CAC) identity, trust, and middleware manager for Linux.</strong>
   </p>
 
   <p>
-    <img src="https://img.shields.io/badge/Platform-Linux-blue.svg?style=flat-square" alt="Platform" />
-    <img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg?style=flat-square&logo=python" alt="Python" />
-    <img src="https://img.shields.io/badge/Rust-PyO3-DEA584?style=flat-square&logo=rust&logoColor=white" alt="Rust" />
-    <img src="https://img.shields.io/badge/UI-GTK4%20%2F%20Libadwaita-00ADD8.svg?style=flat-square" alt="UI" />
-    <img src="https://img.shields.io/badge/CSS-GTK%20CSS-1572B6?style=flat-square&logo=css3&logoColor=white" alt="CSS" />
-    <img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License" />
+    <img src="https://img.shields.io/badge/Made%20with-GTK4%20%2F%20Libadwaita-00ADD8?style=flat-square" alt="GTK4 Libadwaita" />
+    <img src="https://img.shields.io/badge/Language-Python%20%26%20Rust-00ADD8?style=flat-square" alt="Python & Rust" />
+    <img src="https://img.shields.io/badge/Version-v1.4.0-blue?style=flat-square" alt="Version" />
+    <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License" />
   </p>
 
   <p>
-    <img src="https://img.shields.io/badge/Version-v1.3.0-blue.svg?style=flat-square" alt="Version" />
-    <img src="https://img.shields.io/badge/Fedora-Tested-294172?style=flat-square&logo=fedora&logoColor=white" alt="Fedora" />
-    <img src="https://img.shields.io/badge/Ubuntu-Tested-E95420?style=flat-square&logo=ubuntu&logoColor=white" alt="Ubuntu" />
+    <a href="#why-sentinel-cac-manager"><strong>Why Sentinel CAC Manager</strong></a> ·
+    <a href="#installation"><strong>Installation</strong></a> ·
+    <a href="#usage"><strong>Usage</strong></a> ·
+    <a href="#troubleshooting"><strong>Troubleshooting</strong></a> ·
+    <a href="#limitations"><strong>Limitations</strong></a> ·
+    <a href="https://github.com/CodeFXR/Sentinel-CAC-Manager/issues"><strong>Report Bug</strong></a>
   </p>
 </div>
 
-Sentinel CAC Manager verifies the smart card stack, installs the Department of Defense root and intermediate certificate authorities into the system trust store, registers security devices with supported web browsers, and monitors smart card insertion and certificate status.
+<br>
+<br>
 
-## What It Does
+Configuring a Common Access Card on Linux usually requires orchestrating PC/SC daemons, compiling OpenSC drivers, modifying NSS security databases, installing root certificate stores across divergent distribution paths, and battling browser policy locks. One missed configuration step prevents mutual TLS authentication to military portals. Sentinel CAC Manager automates this entire pipeline into a single, verified workflow with an intuitive desktop interface and CLI.
 
-1. **Stack Verification** — Confirms `pcscd` daemon status, OpenSC PKCS#11 module presence, and reader connectivity.
-2. **System Trust Installation** — Deploys Department of Defense Root and Intermediate CA certificates to distribution trust stores (`update-ca-trust` / `update-ca-certificates`).
-3. **Browser Integration** — Configures Mozilla Firefox enterprise policies, sets certificate prompting to ask every time, and configures Chrome and Chromium NSS security databases (`~/.pki/nssdb`).
-4. **Hardware Optimization** — Applies OpenSC configuration adjustments to prevent Broadcom smart card reader driver initialization delays.
-5. **Certificate Inspection** — Reads on-card digital certificates (PIV Authentication, Email Signature, Email Encryption, Device Authentication) and displays validity periods, issuing authorities, and key usage.
+> **Disclaimer:** Unofficial open-source utility; not affiliated with, sponsored by, or endorsed by the U.S. Department of Defense (DoD) or the Defense Information Systems Agency (DISA).
 
-## Setup
+## Why Sentinel CAC Manager?
 
-The installer automatically detects your Linux distribution, checks for missing system dependencies (`pcscd`, `opensc`, `gir1.2-adw-1`, `python3-gi`, `libnss3-tools`, etc.), prompts for administrative authorization (via standard `sudo` or Polkit dialog) to install missing packages, and configures smart card services.
+- **Cryptographic Trust Verification:** Every DoD certificate is verified against an internal SHA-256 manifest before installation.
+- **PKI Trust Anchor Separation:** Installs only the 4 self-signed Root CAs into system root trust, preventing intermediate authority escalation.
+- **Deep Browser Integration:** Registers PKCS#11 modules via non-destructive Firefox enterprise policies and Chrome NSS databases (`~/.pki/nssdb`).
+- **Hardware Optimization:** Restricts OpenSC driver probing to eliminate 26-second Broadcom 58200 contactless initialization hangs.
+- **Multi-Distribution Support:** First-class support for Debian, Ubuntu, Fedora, RHEL, CentOS, Arch Linux, and openSUSE.
+- **Full Operational Rollback:** Clean `--uninstall` mode reverts all certificates, browser policies, modules, and desktop shortcuts.
 
-### Option 1: Release Archive (Recommended for Desktop Users)
+## Installation
 
-1. Download **Sentinel-CAC-Manager.tar.gz** from the [GitHub Releases](https://github.com/CodeFXR/Sentinel-CAC-Manager/releases) page.
-2. Right-click the downloaded archive in your **Downloads** folder and select **Extract Here**.
-3. Open the extracted `Sentinel-CAC-Manager` folder and run the installer:
-   - **Terminal:** Right-click inside the extracted folder, select **Open in Terminal**, and run:
-     ```bash
-     ./install
-     ```
-   - **File Manager:** Double-click `install` or right-click `install` and select **Run as a Program**.
-4. When prompted, enter your administrator password (`sudo` or Polkit dialog) to verify and install system packages. The graphical setup wizard will open automatically.
+### Requirements
 
-### Option 2: Automated Terminal One-Liner
+| Component | Minimum Version | Notes |
+|---|---|---|
+| Linux Kernel | 5.4+ | USB CCID smart card support enabled |
+| Python | 3.10+ | Standard runtime with PyGObject |
+| PC/SC Daemon | 1.8+ | `pcscd` service and socket |
+| OpenSC | 0.20+ | PKCS#11 middleware provider |
 
-To launch the graphical setup wizard directly from the terminal:
+### Option 1: Release Archive (Recommended)
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/CodeFXR/Sentinel-CAC-Manager/main/install | bash
-```
-
-For unattended command-line installation (headless or server environments):
+Download the pre-packaged offline release archive from [GitHub Releases](https://github.com/CodeFXR/Sentinel-CAC-Manager/releases):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CodeFXR/Sentinel-CAC-Manager/main/install | bash -s -- --cli
+tar -xzf Sentinel-CAC-Manager-v1.4.0.tar.gz
+cd Sentinel-CAC-Manager-v1.4.0
+./install
 ```
 
-The setup wizard inspects the host distribution, installs required system components and certificates, configures browser profiles, and adds Sentinel CAC Manager to your application menu.
+### Option 2: Clone from Repository
 
----
+```bash
+git clone https://github.com/CodeFXR/Sentinel-CAC-Manager.git
+cd Sentinel-CAC-Manager
+./install
+```
 
-<p align="center">
-  &copy; CodeFXR. All rights reserved.
-</p>
+<details>
+<summary><strong>Unattended & Headless Installation</strong></summary>
+
+For server or automated container provisioning without graphical display:
+
+```bash
+./install --cli
+```
+</details>
+
+## Usage
+
+Sentinel CAC Manager provides both a Libadwaita desktop application and an unattended command-line interface.
+
+### Command-Line Interface
+
+| Command | Description |
+|---|---|
+| `sentinel` | Launch the graphical user interface |
+| `sentinel --status` | Display full system diagnostics, middleware health, and card status |
+| `sentinel --setup-all` | Run complete automated configuration (services, CAs, browsers) |
+| `sentinel --card-info` | Display details, EDIPI, holder name, and validity of inserted CAC |
+| `sentinel --browsers` | Configure Firefox and Chrome/Chromium NSS databases only |
+| `sentinel --certs` | Install verified DoD Root CAs into operating system trust only |
+| `sentinel --reader-fix` | Apply OpenSC Broadcom reader driver hang fix |
+| `sentinel --uninstall` | Revert all system changes, restore policies, and remove trust |
+
+### Desktop Interface
+
+Launch Sentinel from your application menu or run `sentinel`. The interface provides four primary workspaces:
+
+1. **Dashboard:** Live status overview of reader hardware, inserted card status, EDIPI, and middleware daemon.
+2. **Card Inspector:** Detailed inspection of on-card PIV Authentication, Email Signature, and Encryption certificates.
+3. **Browser Health:** Profile-by-profile verification of Firefox, Chrome, Chromium, Brave, and Edge security devices.
+4. **System Diagnostics:** Distribution detection, package verification, and one-click repair actions.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `No smart card readers found` | `pcscd` daemon inactive or CCID driver missing | Run `sentinel --setup-all` to install `ccid` and enable `pcscd.socket`. |
+| Broadcom reader takes 30s to detect card | OpenSC probing SetCOS and older card drivers | Run `sentinel --reader-fix` to restrict OpenSC drivers to PIV/CAC. |
+| Firefox fails to prompt for PIN | Profile `user.js` or `policies.json` missing | Run `sentinel --browsers` and restart Firefox. |
+| Chrome/Edge does not detect CAC | `~/.pki/nssdb` lacks OpenSC module | Run `sentinel --browsers` while Chrome is closed to release DB lock. |
+| Certificate untrusted in browser | DoD root CA chain missing from NSS/system | Run `sentinel --certs` to deploy verified DoD Root CAs. |
+| `pkexec` dialog fails to open | Polkit agent not running in minimal desktop | Run command via `sudo ./install` in terminal. |
+
+## Limitations
+
+| Limitation | Status | Planned Resolution |
+|---|---|---|
+| On-Card PIN Change | Read-only in v1.4.0 | Planned for Phase 3 (`v1.6.0`) |
+| Background Insert Daemon | Manual/Polled in v1.4.0 | Background event monitor planned for `v1.6.0` |
+| Workstation Login (SSSD/PAM) | Browser/app only in v1.4.0 | OS workstation logon planned for `v2.0.0` |
+| macOS / Windows Support | Unsupported | Linux only by design |
+
+## License
+
+[MIT](LICENSE) © 2026 CodeFXR

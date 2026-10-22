@@ -54,28 +54,22 @@ def get_available_certificates() -> List[CertificateItem]:
 
 
 def is_system_trust_installed(platform: Optional[PlatformInfo] = None) -> bool:
-    """Check if DoD Root and Intermediate CAs are installed in system trust."""
+    """Check if DoD Root CAs are installed in the operating system root trust store."""
     plat = platform or detect_platform()
     if plat.is_debian_derivative:
-        # Check /usr/local/share/ca-certificates/dod or dow
-        for d in ["/usr/local/share/ca-certificates/dod", "/usr/local/share/ca-certificates/dow"]:
-            if os.path.isdir(d) and any(f.endswith(".crt") for f in os.listdir(d)):
-                return True
-        # Check /etc/ssl/certs/ for DoD Root CA
+        # Check /usr/local/share/ca-certificates/dod
+        d = "/usr/local/share/ca-certificates/dod"
+        if os.path.isdir(d) and any(f.startswith("DoD_Root_CA_") for f in os.listdir(d)):
+            return True
+        # Check /etc/ssl/certs/ for extracted DoD Root CA
         if os.path.isfile("/etc/ssl/certs/DoD_Root_CA_3.pem") or os.path.isfile("/etc/ssl/certs/DoD_Root_CA_6.pem"):
             return True
         return False
-    elif plat.is_fedora_derivative:
-        target_dod = os.path.join(plat.trust_dir, "DoD_Full_Chain.pem")
-        target_dow = os.path.join(plat.trust_dir, "DoW_Full_Chain.pem")
-        return (os.path.isfile(target_dod) and os.path.getsize(target_dod) > 1000) or (
-            os.path.isfile(target_dow) and os.path.getsize(target_dow) > 1000
-        )
     else:
-        # Generic check
-        for candidate in ["DoD_Full_Chain.crt", "DoD_Full_Chain.pem", "DoW_Full_Chain.crt", "DoW_Full_Chain.pem"]:
+        # Check plat.trust_dir for DoD_Roots.pem or full chain bundles
+        for candidate in ["DoD_Roots.pem", "DoD_Full_Chain.pem", "DoD_Full_Chain.crt", "DoW_Roots.pem", "DoW_Full_Chain.pem"]:
             t = os.path.join(plat.trust_dir, candidate)
-            if os.path.isfile(t) and os.path.getsize(t) > 1000:
+            if os.path.isfile(t) and os.path.getsize(t) > 200:
                 return True
         return False
 

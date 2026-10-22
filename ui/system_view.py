@@ -195,7 +195,7 @@ class SystemView(Gtk.Box):
 
         # 4. System CA Trust
         if certs_installed:
-            self.sys_cert_badge.set_label("Installed (56 CAs)")
+            self.sys_cert_badge.set_label("Installed (DoD Roots)")
             self.sys_cert_badge.remove_css_class("badge-warning")
             self.sys_cert_badge.add_css_class("badge-success")
             self.sys_cert_btn.set_label("Reinstall")

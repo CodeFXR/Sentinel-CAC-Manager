@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import shutil
 import subprocess
+import threading
+import time
 from typing import Callable, Optional, Dict, Any, List, Tuple
 
 from core.platform_detector import PlatformInfo, detect_platform, find_opensc_module
@@ -53,7 +56,7 @@ def run_privileged_helper(
     log_fn: Optional[Callable[[str], None]] = None,
     timeout: int = 60,
 ) -> Tuple[bool, str]:
-    """Run privileged_helper.py via pkexec (or directly if root)."""
+    """Run privileged_helper.py via pkexec (or directly if root) with non-blocking timeout handling."""
     helper_path = get_helper_script()
     is_root = (os.geteuid() == 0)
     if is_root:
@@ -74,25 +77,80 @@ def run_privileged_helper(
             text=True,
             bufsize=1,
         )
-        output_lines = []
-        if proc.stdout:
-            for line in iter(proc.stdout.readline, ""):
-                line_str = line.strip()
-                if line_str:
-                    output_lines.append(line_str)
-                    if log_fn:
-                        log_fn(line_str)
-
-        proc.wait(timeout=timeout)
-        if proc.returncode == 0:
-            return True, "\n".join(output_lines)
-        else:
-            return False, f"Process exited with code {proc.returncode}"
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        return False, f"Authorization timed out after {timeout} seconds."
     except Exception as e:
-        return False, f"Failed to execute elevated helper: {e}"
+        return False, f"Failed to spawn elevated helper process: {e}"
+
+    output_lines: List[str] = []
+    line_queue: queue.Queue[Optional[str]] = queue.Queue()
+
+    def _reader():
+        try:
+            if proc.stdout:
+                for line in iter(proc.stdout.readline, ""):
+                    line_queue.put(line)
+        except Exception:
+            pass
+        finally:
+            line_queue.put(None)  # Sentinel indicating EOF
+
+    reader_thread = threading.Thread(target=_reader, daemon=True)
+    reader_thread.start()
+
+    deadline = time.monotonic() + timeout
+    timed_out = False
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+
+        try:
+            line = line_queue.get(timeout=min(max(remaining, 0.05), 0.2))
+            if line is None:  # EOF reached
+                break
+            line_str = line.strip()
+            if line_str:
+                output_lines.append(line_str)
+                if log_fn:
+                    log_fn(line_str)
+        except queue.Empty:
+            if proc.poll() is not None:
+                # Process exited; drain remaining lines
+                while True:
+                    try:
+                        rem_line = line_queue.get_nowait()
+                        if rem_line is None:
+                            break
+                        line_str = rem_line.strip()
+                        if line_str:
+                            output_lines.append(line_str)
+                            if log_fn:
+                                log_fn(line_str)
+                    except queue.Empty:
+                        break
+                break
+
+    if timed_out:
+        try:
+            proc.kill()
+            proc.wait(timeout=3)
+        except Exception:
+            pass
+        return False, f"Authorization or elevated execution timed out after {timeout} seconds."
+
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+
+    if proc.returncode == 0:
+        return True, "\n".join(output_lines)
+    else:
+        err_detail = f"Process exited with code {proc.returncode}"
+        if output_lines:
+            err_detail += f": {output_lines[-1]}"
+        return False, err_detail
 
 
 def run_full_setup(
@@ -170,18 +228,34 @@ def run_full_setup(
         except Exception:
             pass
 
-    # Step 4: Verify System State
-    _progress(0.85, "Verifying hardware and browser integration...")
+    # Step 4: Rigorous Postcondition Verification
+    _progress(0.85, "Verifying hardware and browser integration postconditions...")
     card_stat = scan_smartcard()
     b_stat = check_browsers_status()
 
     result["details"]["card_status"] = card_stat
     result["details"]["browser_status"] = b_stat
 
-    _progress(1.0, "Setup Complete! CAC is ready for browser authentication.")
-    result["success"] = True
-    result["message"] = "All system services, DoD certificates, and browsers configured successfully!"
-    _log("[SUCCESS] Full DoD CAC configuration complete!")
+    from core.certificates import is_system_trust_installed
+    trust_verified = is_system_trust_installed(plat)
+    browser_errors = browser_res.get("errors", [])
+
+    if browser_errors:
+        result["success"] = False
+        result["partial"] = True
+        result["message"] = f"Setup completed with warnings/errors: {'; '.join(browser_errors)}"
+        _progress(0.95, "Setup completed with warnings.")
+        _log(f"[WARNING] {result['message']}")
+    elif not trust_verified:
+        result["success"] = False
+        result["message"] = "DoD Root CA trust could not be verified in the operating system root store."
+        _log(f"[ERROR] {result['message']}")
+    else:
+        result["success"] = True
+        result["message"] = "All system services, DoD root trust anchors, and browser security devices verified successfully!"
+        _progress(1.0, "Setup Complete! CAC is ready for browser authentication.")
+        _log("[SUCCESS] Full DoD CAC configuration verified and complete!")
+
     return result
 
 
@@ -273,7 +347,7 @@ Type=Application
 Categories=Utility;Security;
 Keywords=CAC;PIV;DoD;SmartCard;Military;Security;Authentication;
 StartupNotify=true
-StartupWMClass=mil.dod.sentinel_cac_manager
+StartupWMClass=com.codefxr.sentinel_cac_manager
 """
         import tempfile
         with tempfile.NamedTemporaryFile(mode="w", dir=app_dir, delete=False) as f_dt:
@@ -304,15 +378,31 @@ exec python3 {quoted_script} "$@"
         os.chmod(launcher_tmp, 0o755)
         os.replace(launcher_tmp, launcher_path)
 
-        # Symlinks for convenience: sentinel and sentinel-v2
-        for alias in ["sentinel", "sentinel-v2", "sentinel2"]:
+        # Symlink for sentinel: only create or update if it's ours or doesn't exist
+        # Prevent clobbering third-party commands (e.g. HashiCorp Sentinel)
+        alias_path = os.path.join(bin_dir, "sentinel")
+        if os.path.islink(alias_path):
             try:
-                alias_path = os.path.join(bin_dir, alias)
-                if os.path.islink(alias_path) or os.path.exists(alias_path):
+                target = os.readlink(alias_path)
+                if "sentinel-cac-manager" in target or "sentinel" in target:
                     os.remove(alias_path)
-                os.symlink(launcher_path, alias_path)
-            except Exception:
+                    os.symlink(launcher_path, alias_path)
+            except OSError:
                 pass
+        elif not os.path.exists(alias_path):
+            try:
+                os.symlink(launcher_path, alias_path)
+            except OSError:
+                pass
+
+        # Remove legacy dev symlinks if present
+        for old_alias in ["sentinel-v2", "sentinel2"]:
+            old_p = os.path.join(bin_dir, old_alias)
+            if os.path.islink(old_p) or os.path.isfile(old_p):
+                try:
+                    os.remove(old_p)
+                except OSError:
+                    pass
 
         if log_fn:
             log_fn(f"Created command launcher at {launcher_path}")
@@ -346,4 +436,77 @@ exec python3 {quoted_script} "$@"
         if log_fn:
             log_fn(f"[ERROR] {err}")
         return False, err
+
+
+def uninstall_desktop_integration(
+    home_dir: Optional[str] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Tuple[bool, str]:
+    """Remove user-level launchers, shortcuts, icons, and modules."""
+    home = home_dir or os.path.expanduser("~")
+    bin_dir = os.path.join(home, ".local", "bin")
+    app_dir = os.path.join(home, ".local", "share", "applications")
+    icon_dir = os.path.join(home, ".local", "share", "icons", "hicolor", "256x256", "apps")
+    desktop_dir = os.path.join(home, "Desktop")
+
+    files_to_remove = [
+        os.path.join(app_dir, "sentinel_cac_manager.desktop"),
+        os.path.join(app_dir, "sentinel_v2.desktop"),
+        os.path.join(icon_dir, "sentinel_cac_manager.png"),
+        os.path.join(bin_dir, "sentinel-cac-manager"),
+        os.path.join(bin_dir, "sentinel-v2"),
+        os.path.join(bin_dir, "sentinel2"),
+        os.path.join(desktop_dir, "sentinel_cac_manager.desktop"),
+        os.path.join(desktop_dir, "sentinel_v2.desktop"),
+        os.path.join(home, ".config", "pkcs11", "modules", "opensc.module"),
+    ]
+
+    sentinel_bin = os.path.join(bin_dir, "sentinel")
+    if os.path.islink(sentinel_bin):
+        try:
+            target = os.readlink(sentinel_bin)
+            if "sentinel" in target:
+                files_to_remove.append(sentinel_bin)
+        except OSError:
+            pass
+
+    removed_count = 0
+    for f in files_to_remove:
+        if os.path.islink(f) or os.path.isfile(f):
+            try:
+                os.remove(f)
+                removed_count += 1
+            except OSError:
+                pass
+
+    if shutil.which("update-desktop-database") and os.path.isdir(app_dir):
+        subprocess.run(["update-desktop-database", app_dir], capture_output=True)
+
+    msg = f"Removed {removed_count} user desktop and launcher items."
+    if log_fn:
+        log_fn(msg)
+    return True, msg
+
+
+def run_full_uninstall(log_callback: Optional[Callable[[str], None]] = None) -> bool:
+    """Run full uninstallation: revert system trust, browser policies, and user launchers."""
+    def _log(msg: str):
+        logger.info(msg)
+        if log_callback:
+            log_callback(msg)
+
+    _log("Starting Sentinel CAC Manager full uninstallation and rollback...")
+    plat = detect_platform()
+
+    # Step 1: Revert user desktop integration
+    uninstall_desktop_integration(log_fn=_log)
+
+    # Step 2: Elevated uninstallation (system CAs, policies, OpenSC config)
+    ok, helper_msg = run_privileged_helper(["--uninstall", "--family", plat.family], log_fn=_log, timeout=60)
+    if not ok:
+        _log(f"[ERROR] Privileged rollback failed: {helper_msg}")
+        return False
+
+    _log("[SUCCESS] Full uninstallation and rollback completed successfully.")
+    return True
 

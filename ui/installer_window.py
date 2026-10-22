@@ -233,8 +233,8 @@ class InstallerWindow(Adw.Window):
 
         # Component 2: DoD PKI Certificates
         self.switch_certs = Adw.SwitchRow(
-            title="DoD PKI Trust Bundle (56 CAs)",
-            subtitle="Installs all unexpired DoD Root and Intermediate CAs into the system trust store.",
+            title="DoD PKI Trust Bundle (Root CAs)",
+            subtitle="Installs verified DoD Root CAs into system trust and configures enterprise chain for browsers.",
         )
         self.switch_certs.set_active(True)
         opts_group.add(self.switch_certs)
@@ -250,7 +250,7 @@ class InstallerWindow(Adw.Window):
         # Component 4: Desktop Launcher & CLI
         self.switch_desktop = Adw.SwitchRow(
             title="Application Menu Shortcut and CLI Tools",
-            subtitle="Installs Sentinel CAC Manager into your application menu and sets up ~/.local/bin/sentinel-v2.",
+            subtitle="Installs Sentinel CAC Manager into your application menu and sets up ~/.local/bin/sentinel-cac-manager.",
         )
         self.switch_desktop.set_active(True)
         opts_group.add(self.switch_desktop)
@@ -409,7 +409,7 @@ class InstallerWindow(Adw.Window):
 
         r1 = Adw.ActionRow(
             title="DoD Certificate Authorities",
-            subtitle="56 Root and Intermediate CAs installed into system certificate trust store.",
+            subtitle="Verified DoD Root CAs installed into system certificate trust store.",
         )
         b1 = Gtk.Label(label="Active")
         b1.add_css_class("badge-success")
@@ -436,7 +436,7 @@ class InstallerWindow(Adw.Window):
 
         r4 = Adw.ActionRow(
             title="Application Shortcuts",
-            subtitle="Sentinel CAC Manager is available in your desktop application menu and via 'sentinel-v2'.",
+            subtitle="Sentinel CAC Manager is available in your desktop application menu and command line.",
         )
         b4 = Gtk.Label(label="Installed")
         b4.add_css_class("badge-success")
@@ -723,7 +723,7 @@ class InstallerWindow(Adw.Window):
 class InstallerApplication(Adw.Application):
     def __init__(self):
         super().__init__(
-            application_id="mil.dod.sentinel_cac_manager.installer",
+            application_id="com.codefxr.sentinel_cac_manager.installer",
             flags=0,
         )
 

@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel_core"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "libloading",
  "pyo3",
