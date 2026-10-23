@@ -102,27 +102,28 @@ viewswitcher button image {
     font-weight: 600;
 }
 
-/* Master Action Button */
+/* Master Action Button - High contrast, crisp native styling without transform distortion */
 .master-setup-btn {
-    background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
+    background-color: #0284c7;
     color: #ffffff;
     font-weight: 700;
     font-size: 15px;
-    border-radius: 28px;
+    border-radius: 24px;
     padding: 12px 28px;
-    border: 1px solid rgba(56, 189, 248, 0.4);
-    box-shadow: 0 4px 14px rgba(2, 132, 199, 0.4);
-    transition: all 200ms ease-in-out;
+    border: 1px solid rgba(56, 189, 248, 0.5);
+    box-shadow: 0 2px 8px rgba(2, 132, 199, 0.35);
+    transition: background-color 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
 }
 
 .master-setup-btn:hover {
-    background: linear-gradient(135deg, #0369a1 0%, #0284c7 100%);
-    box-shadow: 0 6px 20px rgba(56, 189, 248, 0.6);
-    transform: translateY(-1px);
+    background-color: #0369a1;
+    border-color: rgba(56, 189, 248, 0.8);
+    box-shadow: 0 4px 14px rgba(56, 189, 248, 0.45);
 }
 
 .master-setup-btn:active {
-    transform: translateY(1px);
+    background-color: #075985;
+    box-shadow: 0 1px 4px rgba(2, 132, 199, 0.25);
 }
 
 /* Pulsing Status Dot */

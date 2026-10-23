@@ -167,6 +167,13 @@ class DashboardView(Gtk.Box):
         self.pin_status_row.add_suffix(self.pin_badge)
         self.id_group.add(self.pin_status_row)
 
+        self.logon_status_row = Adw.ActionRow(title="Workstation OS Logon")
+        self.logon_status_row.set_subtitle("—")
+        self.logon_badge = Gtk.Label(label="—")
+        self.logon_badge.add_css_class("badge-info")
+        self.logon_status_row.add_suffix(self.logon_badge)
+        self.id_group.add(self.logon_status_row)
+
         self.container.append(self.id_group)
 
     def update_status(self, card_stat: SmartCardStatus, system_ready: bool):
@@ -259,6 +266,22 @@ class DashboardView(Gtk.Box):
             self.pin_badge.remove_css_class("badge-warning")
             self.pin_badge.remove_css_class("badge-danger")
             self.pin_badge.add_css_class("badge-info")
+
+        # Update Workstation Logon Status
+        from core.system_fix import check_smartcard_logon_status
+        l_stat = check_smartcard_logon_status()
+        self.logon_badge.remove_css_class("badge-info")
+        self.logon_badge.remove_css_class("badge-success")
+        self.logon_badge.remove_css_class("badge-warning")
+
+        if l_stat["logon_enabled"]:
+            self.logon_status_row.set_subtitle("Enabled (SSSD/PAM smart card authentication with password fallback)")
+            self.logon_badge.set_label("Ready")
+            self.logon_badge.add_css_class("badge-success")
+        else:
+            self.logon_status_row.set_subtitle("Not configured (Configure in System tab)")
+            self.logon_badge.set_label("Inactive")
+            self.logon_badge.add_css_class("badge-info")
 
     def on_master_setup_clicked(self, button):
         self.master_btn.set_sensitive(False)

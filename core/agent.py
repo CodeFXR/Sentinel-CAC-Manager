@@ -110,6 +110,48 @@ def uninstall_systemd_user_service(
     return True, "Sentinel background agent service uninstalled."
 
 
+def is_lock_on_removal_enabled() -> bool:
+    """Check if workstation screen should lock upon smart card removal."""
+    try:
+        conf_file = Path.home() / ".config" / "sentinel" / "config.json"
+        if conf_file.is_file():
+            import json
+            data = json.loads(conf_file.read_text(encoding="utf-8"))
+            if "lock_on_removal" in data:
+                return bool(data["lock_on_removal"])
+    except Exception:
+        pass
+
+    gsettings = shutil.which("gsettings")
+    if gsettings:
+        try:
+            res = subprocess.run(
+                [gsettings, "get", "org.gnome.settings-daemon.peripherals.smartcard", "removal-action"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+            if "lock-screen" in res.stdout:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
+def lock_session() -> bool:
+    """Trigger desktop screen lock across systemd sessions (Wayland and X11)."""
+    loginctl = shutil.which("loginctl")
+    if loginctl:
+        try:
+            subprocess.run([loginctl, "lock-session"], capture_output=True, timeout=2)
+            logger.info("Executed loginctl lock-session following smart card removal.")
+            return True
+        except Exception as e:
+            logger.debug(f"Failed to execute loginctl lock-session: {e}")
+    return False
+
+
 def send_desktop_notification(
     title: str,
     body: str,
@@ -197,8 +239,16 @@ def run_agent(stop_event: Optional[threading.Event] = None) -> None:
             )
         else:
             logger.info(f"Smart card removed from reader: {reader_name}")
+            locked = False
+            if is_lock_on_removal_enabled():
+                locked = lock_session()
+
+            body_msg = f"DoD Common Access Card was removed from {reader_name}."
+            if locked:
+                body_msg += "\nWorkstation session locked."
+
             send_desktop_notification(
                 title="Smart Card Removed",
-                body=f"DoD Common Access Card was removed from {reader_name}.",
-                urgency="low",
+                body=body_msg,
+                urgency="normal" if locked else "low",
             )

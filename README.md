@@ -10,7 +10,7 @@
   <p>
     <img src="https://img.shields.io/badge/Made%20with-GTK4%20%2F%20Libadwaita-00ADD8?style=flat-square" alt="GTK4 Libadwaita" />
     <img src="https://img.shields.io/badge/Language-Python%20%26%20Rust-00ADD8?style=flat-square" alt="Python & Rust" />
-    <img src="https://img.shields.io/badge/Version-v1.6.0-blue?style=flat-square" alt="Version" />
+    <img src="https://img.shields.io/badge/Version-v2.0.0-blue?style=flat-square" alt="Version" />
     <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License" />
   </p>
 
@@ -56,8 +56,8 @@ Configuring a Common Access Card on Linux usually requires orchestrating PC/SC d
 Download the pre-packaged offline release archive from [GitHub Releases](https://github.com/CodeFXR/Sentinel-CAC-Manager/releases):
 
 ```bash
-tar -xzf Sentinel-CAC-Manager-v1.6.0.tar.gz
-cd Sentinel-CAC-Manager-v1.6.0
+tar -xzf Sentinel-CAC-Manager-v2.0.0.tar.gz
+cd Sentinel-CAC-Manager-v2.0.0
 ./install
 ```
 
@@ -93,6 +93,9 @@ Sentinel CAC Manager provides both a Libadwaita desktop application and an unatt
 | `sentinel --card-info` | Display details, EDIPI, holder name, and validity of inserted CAC |
 | `sentinel --pin-status` | Display PIV PIN verification retry counter and lock state |
 | `sentinel --change-pin` | Interactively change PIV smart card PIN with zeroized buffers |
+| `sentinel --setup-logon` | Configure workstation OS smart card logon via SSSD and PAM |
+| `sentinel --disable-logon` | Disable workstation OS smart card logon and restore PAM |
+| `sentinel --lock-on-removal` | Enable automatic desktop screen lock when card is removed |
 | `sentinel --agent` | Run background event daemon for desktop insert/removal notifications |
 | `sentinel --install-agent` | Install and enable user systemd service for card monitoring |
 | `sentinel --browsers` | Configure Firefox and Chrome/Chromium NSS databases only |
@@ -126,7 +129,8 @@ Launch Sentinel from your application menu or run `sentinel`. The interface prov
 |---|---|---|
 | On-Card PIN Change | Supported in v1.6.0 | Native NIST SP 800-73-4 APDU implementation |
 | Background Insert Daemon | Supported in v1.6.0 | Systemd user service via `sentinel --install-agent` |
-| Workstation Login (SSSD/PAM) | Browser/app only in v1.6.0 | OS workstation logon planned for `v2.0.0` |
+| Workstation Login (SSSD/PAM) | Supported in v2.0.0 | Authselect / SSSD integration with password fallback |
+| Lock on Card Removal | Supported in v2.0.0 | Automatic desktop lock via GDM and systemd sessions |
 | macOS / Windows Support | Unsupported | Linux only by design |
 
 ## License

@@ -141,6 +141,35 @@ class SystemView(Gtk.Box):
 
         self.content_box.append(self.browser_group)
 
+        # 4. Workstation Smart Card Logon (PAM & SSSD)
+        self.logon_group = Adw.PreferencesGroup()
+        self.logon_group.set_title("Workstation Smart Card Logon (PAM & SSSD)")
+        self.logon_group.set_description(
+            "Log in to your Linux desktop (GDM / console) with your CAC. Password fallback remains available."
+        )
+
+        self.logon_row = Adw.ActionRow(title="Smart Card System Authentication")
+        self.logon_row.set_subtitle("Checking PAM / SSSD configuration...")
+        self.logon_badge = Gtk.Label(label="Checking")
+        self.logon_badge.add_css_class("badge-info")
+        self.logon_row.add_suffix(self.logon_badge)
+
+        self.logon_btn = Gtk.Button(label="Enable...")
+        self.logon_btn.add_css_class("suggested-action")
+        self.logon_btn.connect("clicked", self.on_toggle_logon)
+        self.logon_row.add_suffix(self.logon_btn)
+        self.logon_group.add(self.logon_row)
+
+        self.lock_removal_row = Adw.ActionRow(title="Lock Screen on Smart Card Removal")
+        self.lock_removal_row.set_subtitle("Automatically lock desktop session when CAC is removed")
+        self.lock_removal_switch = Gtk.Switch()
+        self.lock_removal_switch.set_valign(Gtk.Align.CENTER)
+        self.lock_removal_switch.connect("state-set", self.on_lock_removal_switch_toggled)
+        self.lock_removal_row.add_suffix(self.lock_removal_switch)
+        self.logon_group.add(self.lock_removal_row)
+
+        self.content_box.append(self.logon_group)
+
     def update_status(self, plat: PlatformInfo, card_stat: SmartCardStatus):
         b_stat = check_browsers_status()
         certs_installed = is_system_trust_installed(plat)
@@ -231,6 +260,32 @@ class SystemView(Gtk.Box):
             self.chrome_badge.add_css_class("badge-warning")
             self.chrome_row.set_subtitle("Smart card module not registered in ~/.pki/nssdb")
 
+        # 7. Workstation Smart Card Logon (PAM & SSSD)
+        from core.system_fix import check_smartcard_logon_status
+        l_stat = check_smartcard_logon_status()
+        self._logon_enabled = l_stat["logon_enabled"]
+
+        if l_stat["logon_enabled"]:
+            self.logon_row.set_subtitle("Enabled (SSSD / PAM configured; password fallback active)")
+            self.logon_badge.set_label("Enabled")
+            self.logon_badge.remove_css_class("badge-info")
+            self.logon_badge.remove_css_class("badge-warning")
+            self.logon_badge.add_css_class("badge-success")
+            self.logon_btn.set_label("Disable")
+            self.logon_btn.remove_css_class("suggested-action")
+            self.logon_btn.add_css_class("flat")
+        else:
+            self.logon_row.set_subtitle("Not configured (Desktop requires password to authenticate)")
+            self.logon_badge.set_label("Not Configured")
+            self.logon_badge.remove_css_class("badge-info")
+            self.logon_badge.remove_css_class("badge-success")
+            self.logon_badge.add_css_class("badge-warning")
+            self.logon_btn.set_label("Enable...")
+            self.logon_btn.remove_css_class("flat")
+            self.logon_btn.add_css_class("suggested-action")
+
+        self.lock_removal_switch.set_active(l_stat["lock_removal_enabled"])
+
     def on_start_pcscd(self, btn):
         btn.set_sensitive(False)
         threading.Thread(target=self._run_start_pcscd, daemon=True).start()
@@ -280,3 +335,112 @@ class SystemView(Gtk.Box):
     def _after_action(self, ok: bool, title: str, msg: str):
         self.main_window.show_toast(title if ok else f"Action failed: {msg}")
         self.main_window.refresh_all_status()
+
+    def on_lock_removal_switch_toggled(self, switch, state):
+        from core.system_fix import set_lock_on_removal
+        set_lock_on_removal(state, log_fn=self.main_window.append_log)
+        action_name = "enabled" if state else "disabled"
+        self.main_window.show_toast(f"Screen lock on smart card removal {action_name}.")
+        return False
+
+    def on_toggle_logon(self, btn):
+        if getattr(self, "_logon_enabled", False):
+            btn.set_sensitive(False)
+            def worker():
+                from core.system_fix import disable_workstation_logon
+                ok, msg = disable_workstation_logon(log_fn=self.main_window.append_log)
+                GLib.idle_add(self._after_action, ok, "Workstation smart card logon disabled", msg)
+            threading.Thread(target=worker, daemon=True).start()
+        else:
+            self._show_enable_logon_dialog()
+
+    def _show_enable_logon_dialog(self):
+        import getpass
+        current_user = getpass.getuser()
+        card_stat = getattr(self.main_window, "card_status", None)
+        holder_name = None
+        edipi = None
+        if card_stat and card_stat.card_present and card_stat.primary_certificate:
+            holder_name = card_stat.primary_certificate.holder_name
+            edipi = card_stat.primary_certificate.edipi
+
+        dialog = Adw.Window(title="Configure Workstation Smart Card Logon", modal=True, transient_for=self.main_window)
+        dialog.set_default_size(460, 380)
+
+        header = Adw.HeaderBar()
+        header.set_show_end_title_buttons(True)
+
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        main_box.append(header)
+
+        clamp = Adw.Clamp()
+        clamp.set_maximum_size(420)
+        clamp.set_margin_start(16)
+        clamp.set_margin_end(16)
+        clamp.set_margin_bottom(24)
+
+        form_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+
+        info_label = Gtk.Label(
+            label="Enables smart card authentication (GDM/console) via SSSD and PAM. Password fallback is always retained if your card is not inserted.",
+            wrap=True,
+            xalign=0,
+        )
+        info_label.add_css_class("dim-label")
+        form_box.append(info_label)
+
+        group = Adw.PreferencesGroup()
+        user_row = Adw.ActionRow(title="Target Linux User Account", subtitle=current_user)
+        group.add(user_row)
+
+        card_desc = f"{holder_name} (EDIPI: {edipi})" if (holder_name and edipi) else "Inserted Smart Card"
+        card_row = Adw.ActionRow(title="Mapped Smart Card Certificate", subtitle=card_desc)
+        group.add(card_row)
+
+        form_box.append(group)
+
+        spinner = Gtk.Spinner()
+        spinner.set_visible(False)
+        spinner.set_halign(Gtk.Align.CENTER)
+        form_box.append(spinner)
+
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        btn_box.set_halign(Gtk.Align.END)
+        btn_box.set_margin_top(8)
+
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda _: dialog.close())
+
+        confirm_btn = Gtk.Button(label="Enable Smart Card Logon")
+        confirm_btn.add_css_class("suggested-action")
+
+        def on_confirm(_btn):
+            confirm_btn.set_sensitive(False)
+            cancel_btn.set_sensitive(False)
+            spinner.set_visible(True)
+            spinner.start()
+
+            def worker():
+                from core.system_fix import enable_workstation_logon
+                ok, msg = enable_workstation_logon(target_user=current_user, edipi=edipi, log_fn=self.main_window.append_log)
+
+                def on_done():
+                    spinner.stop()
+                    spinner.set_visible(False)
+                    dialog.close()
+                    self._after_action(ok, "Workstation smart card logon configured", msg)
+                    return False
+
+                GLib.idle_add(on_done)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        confirm_btn.connect("clicked", on_confirm)
+        btn_box.append(cancel_btn)
+        btn_box.append(confirm_btn)
+        form_box.append(btn_box)
+
+        clamp.set_child(form_box)
+        main_box.append(clamp)
+        dialog.set_content(main_box)
+        dialog.present()

@@ -62,6 +62,13 @@ def cmd_status():
     if b_stat.snap_firefox_detected:
         print(f"  Snap Firefox:          {'[CONNECTED]' if b_stat.snap_connected else '[DISCONNECTED]'}")
 
+    from core.system_fix import check_smartcard_logon_status
+    logon_info = check_smartcard_logon_status()
+    logon_str = "[CONFIGURED]" if logon_info["logon_enabled"] else "[NOT CONFIGURED]"
+    lock_str = "[ACTIVE]" if logon_info["lock_removal_enabled"] else "[INACTIVE]"
+    print(f"  Workstation Logon:     {logon_str} (Password Fallback Retained)")
+    print(f"  Lock on Removal:       {lock_str}")
+
     print("-" * 65)
     print(" SMART CARD HARDWARE")
     print("-" * 65)
@@ -216,6 +223,50 @@ def cmd_install_agent() -> bool:
     return ok
 
 
+def cmd_setup_logon(target_user: Optional[str] = None) -> bool:
+    from core.smartcard import scan_smartcard
+    from core.system_fix import enable_workstation_logon
+
+    card_stat = scan_smartcard()
+    edipi = None
+    if card_stat.card_present and card_stat.primary_certificate:
+        edipi = card_stat.primary_certificate.edipi
+        holder = card_stat.primary_certificate.holder_name or "Cardholder"
+        print(f"[*] Detected inserted CAC for {holder} (EDIPI: {edipi})")
+
+    print("[*] Configuring PAM / SSSD smart card workstation logon...")
+    ok, msg = enable_workstation_logon(target_user=target_user, edipi=edipi, log_fn=print)
+    if ok:
+        print("[+] SUCCESS: Workstation smart card logon configured.")
+        print("[+] Password fallback remains enabled if card is removed.")
+    else:
+        print(f"[-] FAILED: {msg}")
+    return ok
+
+
+def cmd_disable_logon() -> bool:
+    from core.system_fix import disable_workstation_logon
+    print("[*] Reverting workstation smart card logon and restoring PAM profile...")
+    ok, msg = disable_workstation_logon(log_fn=print)
+    if ok:
+        print("[+] SUCCESS: Workstation smart card logon disabled.")
+    else:
+        print(f"[-] FAILED: {msg}")
+    return ok
+
+
+def cmd_lock_on_removal(enabled: bool) -> bool:
+    from core.system_fix import set_lock_on_removal
+    action_str = "enabling" if enabled else "disabling"
+    print(f"[*] {action_str.capitalize()} screen lock on smart card removal...")
+    ok, msg = set_lock_on_removal(enabled, log_fn=print)
+    if ok:
+        print(f"[+] SUCCESS: {msg}")
+    else:
+        print(f"[-] FAILED: {msg}")
+    return ok
+
+
 def main():
     parser = argparse.ArgumentParser(description="Sentinel CAC Manager - Automated DoD CAC Manager for Linux")
     parser.add_argument("--version", "-v", action="version", version=f"Sentinel CAC Manager v{__version__}")
@@ -224,6 +275,11 @@ def main():
     parser.add_argument("--card-info", action="store_true", help="display details of inserted smart card")
     parser.add_argument("--pin-status", action="store_true", help="display PIV PIN verification retry counter")
     parser.add_argument("--change-pin", action="store_true", help="interactively change PIV smart card PIN")
+    parser.add_argument("--setup-logon", action="store_true", help="configure workstation OS smart card logon (PAM/SSSD)")
+    parser.add_argument("--disable-logon", action="store_true", help="disable workstation OS smart card logon")
+    parser.add_argument("--user", default=None, help="target local username for smart card logon mapping")
+    parser.add_argument("--lock-on-removal", action="store_true", help="enable automatic screen lock when card is removed")
+    parser.add_argument("--no-lock-on-removal", action="store_true", help="disable screen lock when card is removed")
     parser.add_argument("--agent", action="store_true", help="run background smart card event monitor daemon")
     parser.add_argument("--install-agent", action="store_true", help="install and enable user systemd service for agent")
     parser.add_argument("--browsers", action="store_true", help="configure Firefox and Chrome browsers only")
@@ -277,6 +333,18 @@ def main():
         sys.exit(rc)
     elif args.change_pin:
         ok = cmd_change_pin()
+        sys.exit(0 if ok else 1)
+    elif args.setup_logon:
+        ok = cmd_setup_logon(target_user=args.user)
+        sys.exit(0 if ok else 1)
+    elif args.disable_logon:
+        ok = cmd_disable_logon()
+        sys.exit(0 if ok else 1)
+    elif args.lock_on_removal:
+        ok = cmd_lock_on_removal(True)
+        sys.exit(0 if ok else 1)
+    elif args.no_lock_on_removal:
+        ok = cmd_lock_on_removal(False)
         sys.exit(0 if ok else 1)
     elif args.agent:
         cmd_agent()

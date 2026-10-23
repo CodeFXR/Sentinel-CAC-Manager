@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Callable, Optional, Dict, Any, List, Tuple
 
 from core.platform_detector import PlatformInfo, detect_platform, find_opensc_module
@@ -525,4 +526,104 @@ def run_full_uninstall(log_callback: Optional[Callable[[str], None]] = None) -> 
 
     _log("[SUCCESS] Full uninstallation and rollback completed successfully.")
     return True
+
+
+def check_smartcard_logon_status() -> dict:
+    """Inspect workstation PAM/SSSD smartcard logon and screen locking status."""
+    plat = detect_platform()
+    logon_enabled = False
+    sssd_configured = os.path.isfile("/etc/sssd/conf.d/sentinel-smartcard.conf")
+
+    authselect_bin = shutil.which("authselect")
+    if authselect_bin and plat.family in ("fedora", "rhel", "centos"):
+        try:
+            res = subprocess.run([authselect_bin, "is-feature-enabled", "with-smartcard"], capture_output=True)
+            if res.returncode == 0:
+                logon_enabled = True
+        except Exception:
+            pass
+    elif sssd_configured:
+        logon_enabled = True
+
+    from core.agent import is_lock_on_removal_enabled
+    lock_removal_enabled = is_lock_on_removal_enabled()
+
+    return {
+        "logon_enabled": logon_enabled,
+        "lock_removal_enabled": lock_removal_enabled,
+        "sssd_configured": sssd_configured,
+        "platform_supported": plat.family in ("fedora", "rhel", "centos", "debian"),
+    }
+
+
+def enable_workstation_logon(
+    target_user: Optional[str] = None,
+    edipi: Optional[str] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Tuple[bool, str]:
+    """Configure OS smart card logon via elevated privileged helper."""
+    import getpass
+    user = target_user or getpass.getuser()
+    plat = detect_platform()
+    args = ["--logon", "--family", plat.family, "--target-user", user]
+    if edipi:
+        args.extend(["--edipi", edipi])
+
+    ok, msg = run_privileged_helper(args, log_fn=log_fn, timeout=30)
+    return ok, msg
+
+
+def disable_workstation_logon(
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Tuple[bool, str]:
+    """Disable OS smart card logon and restore PAM stack."""
+    plat = detect_platform()
+    ok, msg = run_privileged_helper(["--disable-logon", "--family", plat.family], log_fn=log_fn, timeout=30)
+    return ok, msg
+
+
+def set_lock_on_removal(
+    enabled: bool,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Tuple[bool, str]:
+    """Configure screen lock on smart card removal across desktop environments."""
+    def _log(msg: str):
+        if log_fn:
+            log_fn(msg)
+
+    # 1. Update Sentinel agent user config
+    try:
+        conf_dir = Path.home() / ".config" / "sentinel"
+        conf_dir.mkdir(parents=True, exist_ok=True)
+        conf_file = conf_dir / "config.json"
+        data = {}
+        if conf_file.is_file():
+            import json
+            try:
+                data = json.loads(conf_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        data["lock_on_removal"] = enabled
+        import json
+        conf_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        _log(f"Updated Sentinel config lock_on_removal={enabled}")
+    except Exception as e:
+        _log(f"Warning: Could not write Sentinel user config: {e}")
+
+    # 2. Update GNOME settings if available
+    gsettings = shutil.which("gsettings")
+    if gsettings:
+        action = "lock-screen" if enabled else "none"
+        try:
+            subprocess.run(
+                [gsettings, "set", "org.gnome.settings-daemon.peripherals.smartcard", "removal-action", action],
+                capture_output=True,
+                timeout=2,
+            )
+            _log(f"Configured GNOME smartcard removal-action to '{action}'")
+        except Exception as e:
+            _log(f"Note: Could not set gsettings removal-action: {e}")
+
+    status_str = "enabled" if enabled else "disabled"
+    return True, f"Screen lock on smart card removal {status_str}."
 

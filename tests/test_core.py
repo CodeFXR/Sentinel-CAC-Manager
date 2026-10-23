@@ -22,9 +22,9 @@ from cli import _clean_term
 
 class TestRustBridge(unittest.TestCase):
     def test_rust_availability(self):
-        # On systems where Rust is compiled, verify version 1.6.0
+        # On systems where Rust is compiled, verify version 2.0.0
         if is_rust_available():
-            self.assertEqual(get_rust_version(), "1.6.0")
+            self.assertEqual(get_rust_version(), "2.0.0")
         else:
             self.assertIsNone(get_rust_version())
 
@@ -356,7 +356,7 @@ class TestSubprocessTimeoutHandling(unittest.TestCase):
 class TestVersionConsistency(unittest.TestCase):
     def test_version_matches(self):
         import core
-        self.assertEqual(core.__version__, "1.6.0")
+        self.assertEqual(core.__version__, "2.0.0")
 
 
 class TestPinManagement(unittest.TestCase):
@@ -425,6 +425,35 @@ class TestAgentDaemon(unittest.TestCase):
                 un_ok, un_msg = uninstall_systemd_user_service(home_dir=tmp_home)
                 self.assertTrue(un_ok)
                 self.assertFalse(os.path.isfile(service_file))
+
+
+class TestWorkstationLogon(unittest.TestCase):
+    def test_check_logon_status_structure(self):
+        from core.system_fix import check_smartcard_logon_status
+        stat = check_smartcard_logon_status()
+        self.assertIsInstance(stat, dict)
+        self.assertIn("logon_enabled", stat)
+        self.assertIn("lock_removal_enabled", stat)
+        self.assertIn("sssd_configured", stat)
+        self.assertIn("platform_supported", stat)
+
+    def test_set_lock_on_removal_toggle(self):
+        from core.system_fix import set_lock_on_removal
+        ok1, msg1 = set_lock_on_removal(True)
+        self.assertTrue(ok1)
+        self.assertIn("enabled", msg1)
+
+        ok2, msg2 = set_lock_on_removal(False)
+        self.assertTrue(ok2)
+        self.assertIn("disabled", msg2)
+
+    def test_lock_on_removal_check(self):
+        from core.agent import is_lock_on_removal_enabled
+        from core.system_fix import set_lock_on_removal
+        set_lock_on_removal(True)
+        self.assertTrue(is_lock_on_removal_enabled())
+        set_lock_on_removal(False)
+        self.assertFalse(is_lock_on_removal_enabled())
 
 
 if __name__ == "__main__":
