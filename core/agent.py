@@ -110,10 +110,11 @@ def uninstall_systemd_user_service(
     return True, "Sentinel background agent service uninstalled."
 
 
-def is_lock_on_removal_enabled() -> bool:
+def is_lock_on_removal_enabled(home_dir: Optional[str] = None) -> bool:
     """Check if workstation screen should lock upon smart card removal."""
     try:
-        conf_file = Path.home() / ".config" / "sentinel" / "config.json"
+        base_home = Path(home_dir) if home_dir else Path.home()
+        conf_file = base_home / ".config" / "sentinel" / "config.json"
         if conf_file.is_file():
             import json
             data = json.loads(conf_file.read_text(encoding="utf-8"))
@@ -122,19 +123,20 @@ def is_lock_on_removal_enabled() -> bool:
     except Exception:
         pass
 
-    gsettings = shutil.which("gsettings")
-    if gsettings:
-        try:
-            res = subprocess.run(
-                [gsettings, "get", "org.gnome.settings-daemon.peripherals.smartcard", "removal-action"],
-                capture_output=True,
-                text=True,
-                timeout=1,
-            )
-            if "lock-screen" in res.stdout:
-                return True
-        except Exception:
-            pass
+    if home_dir is None:
+        gsettings = shutil.which("gsettings")
+        if gsettings:
+            try:
+                res = subprocess.run(
+                    [gsettings, "get", "org.gnome.settings-daemon.peripherals.smartcard", "removal-action"],
+                    capture_output=True,
+                    text=True,
+                    timeout=1,
+                )
+                if "lock-screen" in res.stdout:
+                    return True
+            except Exception:
+                pass
 
     return False
 
@@ -224,7 +226,7 @@ def run_agent(stop_event: Optional[threading.Event] = None) -> None:
         last_present = is_present
         if is_present:
             logger.info(f"Smart card inserted in reader: {reader_name}")
-            status = scan_smartcard()
+            status = scan_smartcard(force_refresh=True)
             holder = "DoD Cardholder"
             if status.primary_certificate and status.primary_certificate.holder_name:
                 holder = status.primary_certificate.holder_name

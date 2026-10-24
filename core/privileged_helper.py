@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Privileged helper script for Sentinel v2.
+"""Privileged helper script for Sentinel CAC Manager.
 Runs elevated tasks (system certs, systemctl, opensc.conf, enterprise policies)
 under a single pkexec / sudo invocation so the user only authenticates ONCE.
 """
 
 import argparse
+import base64
+import glob
 import hashlib
 import json
 import os
@@ -13,12 +15,12 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from typing import Optional
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Cryptographic SHA-256 fingerprint whitelist for all official DoD certificates.
-# Verified against DISA DoD PKI source distribution.
+# Cryptographic SHA-256 file digest manifest for official DoD certificates.
 DOD_CA_FINGERPRINTS = {
     "DOD_DERILITY_CA-1.crt": "b792d3cd0a8d2b077ea81cab0c6cd4edc018b054b89c59268d42a5590bd691ff",
     "DOD_DERILITY_CA-3.crt": "365049baa57070951e53dc9011006d94f95b31baff9404fbf2a1734675559d84",
@@ -73,10 +75,106 @@ DOD_CA_FINGERPRINTS = {
     "DoW_Roots.pem": "0b3070a1f74f5d370f758b9c0ea570e9a1d941fb71076969bb2d7902b7226779",
 }
 
+# Canonical ASN.1 DER SHA-256 certificate fingerprints (immune to CRLF/LF line-ending variance).
+DOD_CA_DER_FINGERPRINTS = {
+    "DOD_DERILITY_CA-1.crt": "67a953b9e17f77599c6e553053dcd43fd7478fdd5cbd844612ceb6064386f8df",
+    "DOD_DERILITY_CA-3.crt": "83eea7e541716dcfb4b705a44e34f7e0af86d839c7cd796962a70e91d4932646",
+    "DOD_DERILITY_CA-4.crt": "8112237903e9a9afdc4e5bec6970c3ef09c9a63897da4156c22a77d355ad0deb",
+    "DOD_DERILITY_CA-5.crt": "70a011a6b00759f6ab1d08acb3f646d66f578e41f71f1c9586e1f470f4576870",
+    "DOD_DERILITY_CA-6.crt": "4f6c4dc6800346464db209f5a05ec1f4019e7ba48f7346011d9643d2e4b3eace",
+    "DOD_EMAIL_CA-62.crt": "36490d91175ca3b39b21b21941db70635c58a3fd0f51135af9f0edc15cbf55b6",
+    "DOD_EMAIL_CA-63.crt": "c6a4dac9fd846474ea35c52afada31510d388ee5af694d8e7f7300eee73cbd2f",
+    "DOD_EMAIL_CA-64.crt": "690c69044761d3a9ab208e4ef2c7b461f09ab524137e7d059176324df42480d8",
+    "DOD_EMAIL_CA-65.crt": "d483b29aae8b40d62ad4757f2986a6d541c4241383d7928592fc61ba5d01085a",
+    "DOD_EMAIL_CA-70.crt": "2ad7d00e45d128a46fdb5747d39eaa994f034086d05cb891e01bf61c7d97c083",
+    "DOD_EMAIL_CA-71.crt": "9d7e0bfb84d6a5f66cfd701b786dc75db31422687212bf26c276b70df0627bdb",
+    "DOD_EMAIL_CA-72.crt": "22ffd6b58540bed6f568890348da2654ca54b50f2216c9eade78812782206ba2",
+    "DOD_EMAIL_CA-73.crt": "ca4733b4e471a699d025fa88cee35e07372dcaa9cfe609469c16a72ec5595cf7",
+    "DOD_EMAIL_CA-78.crt": "2c95f5c815569b65cdf70d03f135f2cf130b82b33d5719a68d25a1ec19d405fc",
+    "DOD_EMAIL_CA-79.crt": "3d8d7bf0c6381aa07ff5e0aa47fec6d077aeec1c2ee22183b2c2028a2ff35d68",
+    "DOD_EMAIL_CA-80.crt": "8208232225e469e65e93497402be9a377d81a25938b85ccae3f3adc14078de93",
+    "DOD_EMAIL_CA-81.crt": "8dc6e3657631ec33de1706c2803662786c120825d121b5dd4b1c90b126654967",
+    "DOD_ID_CA-62.crt": "a3626dfa33eadf6f1ac300a733f52322c6cdc59f5d561e2188c493d016c49dd5",
+    "DOD_ID_CA-63.crt": "dd2dc71d5affa281ceb4da78d58a8119ffe606d732dab5343b2b1c3de4993613",
+    "DOD_ID_CA-64.crt": "fc6fd238f81a3b1755db3bc5471440a186ef3ab4e9ea6d76c2e157c22236b482",
+    "DOD_ID_CA-65.crt": "80e252331942dcaaaa7de7fb450ee9610081f44bbe164fe9936a759ba4541e5b",
+    "DOD_ID_CA-70.crt": "3ccc94baa9108ef0ca373b89074b8cfac6c0cf0f07ab190c570d5053032f337a",
+    "DOD_ID_CA-71.crt": "f7ba690fe17cff7b191ac6d32522931c6f472df487574f0d1c576da0d2ab7049",
+    "DOD_ID_CA-72.crt": "b1c14ea631f47bcd7698e7673fdf5b5b104c52631ce58913346ec7a07e154638",
+    "DOD_ID_CA-73.crt": "3d6a666556365400d6e2beed9dd97082537fb74887a5c68b426eb06c327e0826",
+    "DOD_ID_CA-78.crt": "bbaf5275b33aff5aa9e5bce945640ac0c08f4a4d02d7d2e26e78293e912231ce",
+    "DOD_ID_CA-79.crt": "4a3a111b697959d3f620cbf9f5150e4087861d47a695860aff8136a819a71e1a",
+    "DOD_ID_CA-80.crt": "ad6bb50b82da2f99c242d7971012175809b22af0112f1e695ef3c236c7d2f22e",
+    "DOD_ID_CA-81.crt": "abdc810cf17cea00bbaace9418b872c25cf8bf3d7694a4e05b9f391d23b80d03",
+    "DOD_SW_CA-66.crt": "79dd87d87503bd9c422b49e2bf7a23a5c0783cce85d588759f3a349ec26eb84a",
+    "DOD_SW_CA-67.crt": "cca9b469b4edda4d615b58c130ecaebba5ca439adbee8be15206626e5122f4ca",
+    "DOD_SW_CA-68.crt": "dcd29a5b27db87d5d617f395edad6d7fa0fe230117afbf6c4b7f31f372a2e66a",
+    "DOD_SW_CA-69.crt": "3320f4876c4d0fa7118f2891a1421bb3cda7bb64be80f9bd040bcff6faa3dbee",
+    "DOD_SW_CA-74.crt": "6338c57b568b1d47568ab7548a8d66cc31bc4a096a4cc10a4b45edeb09bd65f6",
+    "DOD_SW_CA-75.crt": "6cbc8895834385d27678cb0012d224277b02dcfc4502bceafdfe1a0a2543f416",
+    "DOD_SW_CA-76.crt": "0e0f71389c9937334989842a908206e671f356a10903e2cf398abb5e27b3f40c",
+    "DOD_SW_CA-77.crt": "48e2775e6db09931c3d62a913889affc653aa9d9142ac4c10bd11f6968fc4a31",
+    "DOD_SW_CA-82.crt": "7aafb4a72e96483d9db2b4226dcead0bb01a95c236768c7a0f681abf5f168e81",
+    "DOD_SW_CA-83.crt": "cc88db853e8f8c2c61f40f281ebca7ed08a082e1ac10679b785db9f76e9b7015",
+    "DOD_SW_CA-84.crt": "560eb4465753bd286bf65fd0d16256fd126daa0d1d5abbe9ff7a5688ae830357",
+    "DOD_SW_CA-85.crt": "6fa364cfc7ecdc69e581d20f0bcea306f8d8a52142b3dadda949276db1061098",
+    "DoD_Root_CA_3.crt": "b107b33f453e5510f68e513110c6f6944bacc263df0137f821c1b3c2f8f863d2",
+    "DoD_Root_CA_4.crt": "559a5189452b13f8233f0022363c06f26e3c517c1d4b77445035959df3244f74",
+    "DoD_Root_CA_5.crt": "1f4ede9dc2a241f6521bf518424acd49ebe84420e69daf5bac57af1f8ee294a9",
+    "DoD_Root_CA_6.crt": "2a5e41aca93df7cc496d2369b7a0a037045d502f1abaaf76975fc07c6660cf93",
+}
+
+DOD_ROOT_FILES = ("DoD_Root_CA_3.crt", "DoD_Root_CA_4.crt", "DoD_Root_CA_5.crt", "DoD_Root_CA_6.crt")
+DOD_ROOT_DER_FINGERPRINTS = {k: DOD_CA_DER_FINGERPRINTS[k] for k in DOD_ROOT_FILES}
+
+SAFE_MODULE_PATH = re.compile(r"^/[a-zA-Z0-9_./\-]+\.so(\.[0-9]+)*$")
+
+
+def find_default_opensc_module() -> str:
+    """Discover the system's opensc-pkcs11.so path dynamically."""
+    patterns = [
+        "/usr/lib64/opensc-pkcs11.so*",
+        "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so*",
+        "/usr/lib/opensc-pkcs11.so*",
+        "/usr/lib/pkcs11/opensc-pkcs11.so*",
+        "/usr/lib64/pkcs11/opensc-pkcs11.so*",
+        "/usr/lib/*-linux-gnu/opensc-pkcs11.so*",
+    ]
+    for pattern in patterns:
+        for m in sorted(glob.glob(pattern)):
+            if os.path.isfile(m):
+                return m
+    return "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so"
+
+
+def validate_pkcs11_module_path(module_path: Optional[str]) -> Optional[str]:
+    """Validate that a PKCS#11 module path is safe, under /usr/lib* or /lib*, exists, is root-owned, and is not world-writable."""
+    if not module_path:
+        module_path = find_default_opensc_module()
+    if any(c in module_path for c in ("\r", "\n", "\0", '"', "'", ";", "`", "$")):
+        log(f"Security: Rejected PKCS#11 module path containing control/meta characters: {module_path!r}")
+        return None
+    if not SAFE_MODULE_PATH.match(module_path) or not module_path.startswith(("/usr/lib", "/lib", "/usr/local/lib")):
+        log(f"Security: Rejected PKCS#11 module path failing format/prefix validation: {module_path!r}")
+        return None
+    if not os.path.isfile(module_path):
+        log(f"Security: Rejected non-existent PKCS#11 module path: {module_path!r}")
+        return None
+    try:
+        st = os.stat(module_path)
+        if st.st_uid != 0:
+            log(f"Security: Rejected non-root-owned PKCS#11 module: {module_path}")
+            return None
+        if st.st_mode & stat.S_IWOTH:
+            log(f"Security: Rejected world-writable PKCS#11 module: {module_path}")
+            return None
+    except OSError:
+        return None
+    return module_path
+
 
 def get_certs_dir(override: str = None) -> str:
     """Discover certificates directory across system, local, and user installs."""
-    # Priority 1: Protected root-controlled installation store (mode 0755 root:root)
     system_store = "/usr/share/sentinel/certificates"
     if os.path.isdir(system_store) and os.path.isdir(os.path.join(system_store, "all_cas")):
         try:
@@ -85,7 +183,6 @@ def get_certs_dir(override: str = None) -> str:
         except Exception:
             pass
 
-    # Priority 2: Validated override if provided
     if override and os.path.isdir(override) and os.path.isdir(os.path.join(override, "all_cas")):
         if not any(c in override for c in ("\r", "\n", "\0")):
             return os.path.abspath(override)
@@ -129,6 +226,15 @@ def log(msg):
     print(f"[SENTINEL-ROOT] {msg}", flush=True)
 
 
+def is_opensc_config_optimized(content: str) -> bool:
+    """Return True if an uncommented card_drivers line in opensc.conf includes piv-II."""
+    for line in content.splitlines():
+        uncommented = line.split("#", 1)[0].strip()
+        if "card_drivers" in uncommented and ("piv-II" in uncommented or "PIV-II" in uncommented):
+            return True
+    return False
+
+
 def reset_smartcard_atr():
     """Trigger a warm card reset to avoid requiring physical card re-insertion after pcscd restart."""
     tool = shutil.which("opensc-tool")
@@ -151,7 +257,6 @@ def ensure_system_helper():
         current_script = os.path.abspath(__file__)
         if current_script != sys_helper:
             os.makedirs(sys_dir, exist_ok=True)
-            import tempfile
             with tempfile.NamedTemporaryFile(dir=sys_dir, delete=False) as f_tmp:
                 temp_dst = f_tmp.name
                 with open(current_script, "rb") as f_src:
@@ -167,14 +272,17 @@ def ensure_system_helper():
         log(f"System helper sync note: {e}")
 
 
-def enable_pcscd():
+def enable_pcscd() -> bool:
     log("Enabling and starting pcscd daemon...")
     res = subprocess.run(["systemctl", "enable", "--now", "pcscd.socket", "pcscd"], capture_output=True, text=True)
     if res.returncode == 0:
         log("pcscd service and socket enabled and started.")
+        reset_smartcard_atr()
+        return True
     else:
         log(f"pcscd service warning: {res.stderr.strip()}")
-    reset_smartcard_atr()
+        reset_smartcard_atr()
+        return False
 
 
 def fix_opensc_hang():
@@ -191,13 +299,13 @@ def fix_opensc_hang():
     original = ""
     if os.path.isfile(target_conf):
         try:
-            with open(target_conf, "r") as f:
+            with open(target_conf, "r", encoding="utf-8", errors="replace") as f:
                 original = f.read()
         except OSError:
             pass
 
-    # Check if card_drivers is already set inside the configuration
-    if "card_drivers" in original and ("piv-II" in original or "PIV-II" in original):
+    # Check if card_drivers is already set in active (uncommented) configuration
+    if is_opensc_config_optimized(original):
         log(f"OpenSC already optimized in {target_conf}")
         return
 
@@ -206,7 +314,7 @@ def fix_opensc_hang():
     if os.path.isfile(target_conf) and not os.path.exists(bak) and not os.path.islink(bak):
         try:
             fd_bak = os.open(bak, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-            with open(fd_bak, "w") as f_bak:
+            with open(fd_bak, "w", encoding="utf-8") as f_bak:
                 f_bak.write(original)
             log(f"Backed up original configuration to {bak}")
         except Exception as e:
@@ -215,22 +323,26 @@ def fix_opensc_hang():
     # OpenSC requires card_drivers to be inside an app default { ... } block and end with a semicolon
     if "app default {" in original:
         idx = original.find("app default {") + len("app default {")
-        updated = original[:idx] + f"\n\t# Restricts card drivers to skip the 26-second Broadcom 58200 setcos probe hang.\n\t{OPENSC_DIRECTIVE}\n" + original[idx:]
+        updated = (
+            original[:idx]
+            + f"\n\t# Restricts card drivers to skip the 26-second Broadcom 58200 setcos probe hang.\n\t{OPENSC_DIRECTIVE}\n"
+            + original[idx:]
+        )
     elif original.strip():
         updated = original.rstrip() + f"\n\napp default {{\n\t# Added by Sentinel CAC Manager.\n\t{OPENSC_DIRECTIVE}\n}}\n"
     else:
-        updated = f"""app default {{
-\t# Added by Sentinel CAC Manager.
-\t# Restricts card drivers to skip the 26-second Broadcom 58200 setcos probe hang.
-\t{OPENSC_DIRECTIVE}
-}}
-"""
+        updated = (
+            "app default {\n"
+            "\t# Added by Sentinel CAC Manager.\n"
+            "\t# Restricts card drivers to skip the 26-second Broadcom 58200 setcos probe hang.\n"
+            f"\t{OPENSC_DIRECTIVE}\n"
+            "}\n"
+        )
 
     try:
         conf_dir = os.path.dirname(target_conf)
         os.makedirs(conf_dir, exist_ok=True)
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode="w", dir=conf_dir, delete=False) as f_tmp:
+        with tempfile.NamedTemporaryFile(mode="w", dir=conf_dir, delete=False, encoding="utf-8") as f_tmp:
             tmp_name = f_tmp.name
             f_tmp.write(updated)
         os.chmod(tmp_name, 0o644)
@@ -241,51 +353,160 @@ def fix_opensc_hang():
 
 
 SAFE_CERT_FILENAME = re.compile(r"^[a-zA-Z0-9_.-]+\.(crt|pem)$")
-PEM_CERT_PATTERN = re.compile(rb"-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----")
+PEM_CERT_PATTERN = re.compile(rb"-----BEGIN CERTIFICATE-----([\s\S]+?)-----END CERTIFICATE-----")
 
 
-def _parse_and_reserialize_single_cert(pem_bytes: bytes) -> Optional[bytes]:
-    """Validate a single PEM certificate block and return canonical reserialized PEM bytes."""
-    # 1. Try python cryptography library if available
+def _extract_der_from_pem_body(b64_body: bytes) -> Optional[bytes]:
+    """Decode base64 body of a PEM certificate block into raw ASN.1 DER bytes."""
     try:
-        from cryptography import x509
-        from cryptography.hazmat.primitives import serialization
-        cert = x509.load_pem_x509_certificate(pem_bytes)
-        if cert.subject and cert.issuer:
-            return cert.public_bytes(serialization.Encoding.PEM).strip()
+        cleaned = re.sub(rb"\s+", b"", b64_body)
+        der = base64.b64decode(cleaned, validate=True)
+        if len(der) >= 64 and der[0] == 0x30:
+            return der
     except Exception:
         pass
-
-    # 2. Try OpenSSL CLI (piped directly into stdin, zero temp files)
-    try:
-        proc = subprocess.run(
-            ["openssl", "x509"],
-            input=pem_bytes,
-            capture_output=True,
-            timeout=5,
-        )
-        if proc.returncode == 0 and b"-----BEGIN CERTIFICATE-----" in proc.stdout:
-            return proc.stdout.strip()
-    except Exception:
-        pass
-
     return None
 
 
-def _validate_and_reserialize_cert(data: bytes, fname: str) -> Optional[bytes]:
-    """Validate X.509 certificate data and reserialize into canonical PEM format."""
-    pem_blocks = PEM_CERT_PATTERN.findall(data)
-    if not pem_blocks:
+def _verify_x509_ca_properties(der_bytes: bytes, require_self_signed: bool = False) -> Optional[bytes]:
+    """Verify ASN.1 X.509 certificate structure, CA basic constraints, expiry, and self-signed root status.
+
+    Returns canonical PEM bytes on success, or None if validation fails.
+    """
+    # 1. Verify via OpenSSL CLI (handles all NIST/DoD RSA and ECDSA P-384 certificates reliably)
+    if shutil.which("openssl"):
+        try:
+            proc_check = subprocess.run(
+                [
+                    "openssl",
+                    "x509",
+                    "-inform",
+                    "DER",
+                    "-noout",
+                    "-subject",
+                    "-issuer",
+                    "-ext",
+                    "basicConstraints",
+                    "-checkend",
+                    "0",
+                ],
+                input=der_bytes,
+                capture_output=True,
+                timeout=5,
+            )
+            if proc_check.returncode != 0:
+                return None
+            out_text = proc_check.stdout.decode(errors="replace")
+            if "CA:TRUE" not in out_text:
+                return None
+
+            subj_line = ""
+            iss_line = ""
+            for line in out_text.splitlines():
+                if line.startswith("subject="):
+                    subj_line = line[len("subject="):].strip()
+                elif line.startswith("issuer="):
+                    iss_line = line[len("issuer="):].strip()
+
+            if not subj_line or not iss_line:
+                return None
+            if require_self_signed and subj_line != iss_line:
+                return None
+
+            proc_pem = subprocess.run(
+                ["openssl", "x509", "-inform", "DER", "-outform", "PEM"],
+                input=der_bytes,
+                capture_output=True,
+                timeout=5,
+            )
+            if proc_pem.returncode == 0 and b"-----BEGIN CERTIFICATE-----" in proc_pem.stdout:
+                return proc_pem.stdout.strip()
+        except Exception:
+            pass
+
+    # 2. Fallback to Python cryptography library if openssl binary is unavailable
+    try:
+        from datetime import datetime, timezone
+        from cryptography import x509
+        from cryptography.hazmat.primitives import serialization
+
+        cert = x509.load_der_x509_certificate(der_bytes)
+        if not cert.subject or not cert.issuer:
+            return None
+        if require_self_signed and cert.subject != cert.issuer:
+            return None
+        now = datetime.now(timezone.utc)
+        if hasattr(cert, "not_valid_after_utc") and cert.not_valid_after_utc <= now:
+            return None
+        bc = cert.extensions.get_extension_for_class(x509.BasicConstraints)
+        if not bc.value.ca:
+            return None
+        return cert.public_bytes(serialization.Encoding.PEM).strip()
+    except Exception:
+        return None
+
+
+def _validate_and_reserialize_cert(
+    data: bytes,
+    fname: str,
+    verify_whitelist: bool = True,
+) -> Optional[bytes]:
+    """Validate X.509 certificate data, DER fingerprints, and CA properties, returning canonical PEM."""
+    pem_bodies = PEM_CERT_PATTERN.findall(data)
+    if not pem_bodies:
         log(f"Security: Rejected {fname}: contains no valid PEM certificate blocks")
         return None
 
+    is_root_target = fname in DOD_ROOT_DER_FINGERPRINTS or fname in ("DoD_Roots.pem", "DoW_Roots.pem")
+    all_allowed_ders = set(DOD_CA_DER_FINGERPRINTS.values())
+    root_allowed_ders = set(DOD_ROOT_DER_FINGERPRINTS.values())
+
     reserialized_certs = []
-    for idx, block in enumerate(pem_blocks):
-        validated_pem = _parse_and_reserialize_single_cert(block)
+    seen_der_hashes = []
+
+    for idx, body in enumerate(pem_bodies):
+        der_bytes = _extract_der_from_pem_body(body)
+        if not der_bytes:
+            log(f"Security: Rejected {fname}: block {idx + 1} has invalid base64 or ASN.1 sequence")
+            return None
+
+        der_sha256 = hashlib.sha256(der_bytes).hexdigest().lower()
+        seen_der_hashes.append(der_sha256)
+
+        if verify_whitelist:
+            if fname in DOD_CA_DER_FINGERPRINTS:
+                expected_der = DOD_CA_DER_FINGERPRINTS[fname]
+                if der_sha256 != expected_der:
+                    log(
+                        f"Security: DER fingerprint mismatch for '{fname}'! "
+                        f"Expected {expected_der}, got {der_sha256}"
+                    )
+                    return None
+            elif fname in ("DoD_Roots.pem", "DoW_Roots.pem"):
+                if der_sha256 not in root_allowed_ders:
+                    log(f"Security: Non-root certificate found inside root bundle '{fname}' ({der_sha256})")
+                    return None
+            elif fname in ("DoD_Full_Chain.pem", "DoD_Full_Chain.crt", "DoW_Full_Chain.pem", "DoW_Full_Chain.crt"):
+                if der_sha256 not in all_allowed_ders:
+                    log(f"Security: Unauthorized certificate block {idx + 1} in '{fname}' ({der_sha256})")
+                    return None
+            else:
+                log(f"Security: Rejected unauthorized certificate filename '{fname}'")
+                return None
+
+        validated_pem = _verify_x509_ca_properties(der_bytes, require_self_signed=is_root_target)
         if not validated_pem:
-            log(f"Security: Rejected {fname}: certificate block {idx+1} failed X.509 ASN.1 validation")
+            log(f"Security: Rejected {fname}: certificate block {idx + 1} failed X.509 CA/validity verification")
             return None
         reserialized_certs.append(validated_pem)
+
+    if verify_whitelist:
+        if fname in DOD_CA_DER_FINGERPRINTS and len(pem_bodies) != 1:
+            log(f"Security: Rejected '{fname}': single-certificate file contained {len(pem_bodies)} blocks")
+            return None
+        if fname in ("DoD_Roots.pem", "DoW_Roots.pem") and set(seen_der_hashes) != root_allowed_ders:
+            log(f"Security: Rejected '{fname}': root bundle does not contain all 4 required DoD Root CAs")
+            return None
 
     return b"\n".join(reserialized_certs) + b"\n"
 
@@ -294,20 +515,18 @@ def _read_and_validate_cert(src_path: str, expected_dir: str, verify_whitelist: 
     """Securely read and validate certificate bytes without following symlinks (CWE-59).
 
     Enforces source confinement, rejects symlinks, verifies regular file status,
-    validates SHA-256 cryptographic fingerprint against authorized DoD manifest,
-    validates X.509 ASN.1 structure, and returns canonical reserialized PEM bytes.
+    validates canonical X.509 DER SHA-256 fingerprint against authorized DoD manifest,
+    validates X.509 CA constraints and validity, and returns canonical reserialized PEM bytes.
     """
     fname = os.path.basename(src_path)
     if not SAFE_CERT_FILENAME.match(fname):
         log(f"Security: Rejected certificate filename '{fname}' (invalid characters or extension)")
         return None
 
-    # Check for symlink before opening
     if os.path.islink(src_path):
         log(f"Security: Rejected symlink in certificates directory: {src_path} (CWE-59)")
         return None
 
-    # Open with O_NOFOLLOW to atomically eliminate symlink races (TOCTOU)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
         fd = os.open(src_path, flags)
@@ -321,12 +540,10 @@ def _read_and_validate_cert(src_path: str, expected_dir: str, verify_whitelist: 
             log(f"Security: Rejected non-regular file: {src_path}")
             return None
 
-        # Sanity check size: between 64 bytes and 1 MB
         if st.st_size < 64 or st.st_size > 1048576:
             log(f"Security: Rejected cert {src_path} with unexpected size ({st.st_size} bytes)")
             return None
 
-        # Enforce source directory confinement using /proc/self/fd on Linux
         try:
             real_src = os.path.realpath(f"/proc/self/fd/{fd}")
             real_expected = os.path.realpath(expected_dir)
@@ -341,18 +558,11 @@ def _read_and_validate_cert(src_path: str, expected_dir: str, verify_whitelist: 
     finally:
         os.close(fd)
 
-    # Cryptographic SHA-256 fingerprint verification against authorized DoD whitelist
-    if verify_whitelist:
-        computed_sha = hashlib.sha256(raw_data).hexdigest().lower()
-        expected_sha = DOD_CA_FINGERPRINTS.get(fname)
-        if not expected_sha:
-            log(f"Security: Rejected unauthorized certificate '{fname}' (not in authorized DoD manifest)")
-            return None
-        if computed_sha != expected_sha:
-            log(f"Security: Cryptographic fingerprint mismatch for '{fname}'! Expected {expected_sha}, got {computed_sha}")
-            return None
+    if verify_whitelist and fname not in DOD_CA_FINGERPRINTS and fname not in DOD_CA_DER_FINGERPRINTS:
+        log(f"Security: Rejected unauthorized certificate '{fname}' (not in authorized DoD manifest)")
+        return None
 
-    return _validate_and_reserialize_cert(raw_data, fname)
+    return _validate_and_reserialize_cert(raw_data, fname, verify_whitelist=verify_whitelist)
 
 
 def _write_secure_cert(src_path: str, dst_path: str, expected_dir: str, verify_whitelist: bool = True) -> bool:
@@ -366,7 +576,6 @@ def _write_secure_cert(src_path: str, dst_path: str, expected_dir: str, verify_w
     os.makedirs(dst_dir, exist_ok=True)
     temp_dst = None
     try:
-        import tempfile
         with tempfile.NamedTemporaryFile(dir=dst_dir, delete=False) as f_out:
             temp_dst = f_out.name
             f_out.write(data)
@@ -383,12 +592,46 @@ def _write_secure_cert(src_path: str, dst_path: str, expected_dir: str, verify_w
         return False
 
 
+def _clean_sentinel_owned_certs_in_dir(target_dir: str, keep_roots: bool = False) -> int:
+    """Remove only certificates explicitly known to belong to Sentinel's DoD manifest.
+
+    Never deletes third-party or administrator-placed certificates in shared directories.
+    """
+    if not os.path.isdir(target_dir):
+        return 0
+
+    removed = 0
+    known_sentinel_files = set(DOD_CA_FINGERPRINTS.keys()) | set(DOD_CA_DER_FINGERPRINTS.keys())
+    root_set = set(DOD_ROOT_FILES)
+
+    for existing in list(os.listdir(target_dir)):
+        if keep_roots and existing in root_set:
+            continue
+        if existing in known_sentinel_files:
+            p = os.path.join(target_dir, existing)
+            if os.path.isfile(p) or os.path.islink(p):
+                try:
+                    os.remove(p)
+                    removed += 1
+                except OSError:
+                    pass
+
+    # Only remove directory if we are not keeping roots and the directory is now completely empty
+    if not keep_roots:
+        try:
+            if not os.listdir(target_dir):
+                os.rmdir(target_dir)
+        except OSError:
+            pass
+
+    return removed
+
+
 def install_system_certificates(distro_family: str) -> bool:
     """Install ONLY self-signed DoD Root CAs into the operating system trust store.
 
     Intermediate CAs are deliberately excluded from the system root store to enforce
     proper PKI trust anchor separation and prevent intermediate authority elevation.
-    Intermediate CAs are made available to browsers via policy bundles and NSS databases.
     """
     log("Installing DoD Root CAs into system trust store (trust anchor separation enforced)...")
     roots_dir = os.path.join(CERTS_DIR, "roots")
@@ -400,20 +643,12 @@ def install_system_certificates(distro_family: str) -> bool:
     if distro_family == "debian":
         target_dir = "/usr/local/share/ca-certificates/dod"
         os.makedirs(target_dir, exist_ok=True)
-        # Clean legacy dow store or stale intermediate files
-        legacy_dow = "/usr/local/share/ca-certificates/dow"
-        if os.path.isdir(legacy_dow):
-            shutil.rmtree(legacy_dow, ignore_errors=True)
-        for existing in os.listdir(target_dir):
-            if existing.endswith(".crt") and not existing.startswith("DoD_Root_CA_"):
-                try:
-                    os.remove(os.path.join(target_dir, existing))
-                except OSError:
-                    pass
+        # Clean only Sentinel-known legacy files in dow or stale Sentinel intermediates in dod
+        _clean_sentinel_owned_certs_in_dir("/usr/local/share/ca-certificates/dow", keep_roots=False)
+        _clean_sentinel_owned_certs_in_dir(target_dir, keep_roots=True)
 
-        # Deploy ONLY the 4 self-signed Root CAs
-        root_files = ["DoD_Root_CA_3.crt", "DoD_Root_CA_4.crt", "DoD_Root_CA_5.crt", "DoD_Root_CA_6.crt"]
-        for fname in root_files:
+        # Deploy ALL 4 self-signed Root CAs; fail if any required root is missing or invalid
+        for fname in DOD_ROOT_FILES:
             src = os.path.join(roots_dir, fname)
             if not os.path.isfile(src):
                 src = os.path.join(CERTS_DIR, fname)
@@ -423,7 +658,14 @@ def install_system_certificates(distro_family: str) -> bool:
                     count += 1
                 else:
                     success = False
-        log(f"Installed {count} DoD Root CAs into {target_dir}")
+            else:
+                log(f"ERROR: Required root certificate missing: {fname}")
+                success = False
+
+        if count != len(DOD_ROOT_FILES):
+            success = False
+
+        log(f"Installed {count}/{len(DOD_ROOT_FILES)} DoD Root CAs into {target_dir}")
         res = subprocess.run(["update-ca-certificates", "--fresh"], capture_output=True, text=True)
         log(f"Ran update-ca-certificates: {res.stdout.strip()}")
         if res.returncode != 0:
@@ -431,7 +673,6 @@ def install_system_certificates(distro_family: str) -> bool:
     elif distro_family == "fedora":
         target_dir = "/etc/pki/ca-trust/source/anchors"
         os.makedirs(target_dir, exist_ok=True)
-        # Remove legacy full chain from root anchors if previously deployed
         for old in ["DoD_Full_Chain.pem", "DoW_Full_Chain.pem", "DoW_Roots.pem"]:
             p = os.path.join(target_dir, old)
             if os.path.isfile(p):
@@ -452,7 +693,7 @@ def install_system_certificates(distro_family: str) -> bool:
     elif distro_family == "arch":
         target_dir = "/etc/ca-certificates/trust-source/anchors"
         os.makedirs(target_dir, exist_ok=True)
-        for old in ["DoD_Full_Chain.pem", "DoW_Full_Chain.pem"]:
+        for old in ["DoD_Full_Chain.pem", "DoW_Full_Chain.pem", "DoW_Roots.pem"]:
             p = os.path.join(target_dir, old)
             if os.path.isfile(p):
                 try:
@@ -472,7 +713,7 @@ def install_system_certificates(distro_family: str) -> bool:
     elif distro_family == "suse":
         target_dir = "/etc/pki/trust/anchors"
         os.makedirs(target_dir, exist_ok=True)
-        for old in ["DoD_Full_Chain.pem", "DoW_Full_Chain.pem"]:
+        for old in ["DoD_Full_Chain.pem", "DoW_Full_Chain.pem", "DoW_Roots.pem"]:
             p = os.path.join(target_dir, old)
             if os.path.isfile(p):
                 try:
@@ -490,14 +731,19 @@ def install_system_certificates(distro_family: str) -> bool:
         if res.returncode != 0:
             success = False
     else:
-        # Fallback to update-ca-certificates
         target_dir = "/usr/local/share/ca-certificates/dod"
         os.makedirs(target_dir, exist_ok=True)
-        root_files = ["DoD_Root_CA_3.crt", "DoD_Root_CA_4.crt", "DoD_Root_CA_5.crt", "DoD_Root_CA_6.crt"]
-        for fname in root_files:
+        for fname in DOD_ROOT_FILES:
             src = os.path.join(roots_dir, fname)
             if os.path.isfile(src):
-                _write_secure_cert(src, os.path.join(target_dir, fname), os.path.dirname(src))
+                if _write_secure_cert(src, os.path.join(target_dir, fname), os.path.dirname(src)):
+                    count += 1
+                else:
+                    success = False
+            else:
+                success = False
+        if count != len(DOD_ROOT_FILES):
+            success = False
         res = subprocess.run(["update-ca-certificates"], capture_output=True)
         log("Updated system ca certificates.")
         if res.returncode != 0:
@@ -506,90 +752,215 @@ def install_system_certificates(distro_family: str) -> bool:
     return success
 
 
-def install_firefox_policies(module_path: str, distro_family: str):
-    log("Installing Firefox Enterprise Policies with safe deep merge...")
-    import json
-    import tempfile
+def merge_firefox_policy_file(target: str, module_path: str, cert_path: str) -> bool:
+    """Safely deep-merge Sentinel CAC settings into a Firefox policies.json file."""
+    try:
+        target_dir = os.path.dirname(target)
+        os.makedirs(target_dir, exist_ok=True)
+        existing_data = {}
+        if os.path.isfile(target):
+            try:
+                with open(target, "r", encoding="utf-8") as f_ex:
+                    loaded = json.load(f_ex)
+                    if isinstance(loaded, dict):
+                        existing_data = loaded
+            except Exception:
+                existing_data = {}
 
+        policies = existing_data.get("policies")
+        if not isinstance(policies, dict):
+            policies = {}
+
+        # Deep merge Certificates
+        certs_block = policies.get("Certificates")
+        if not isinstance(certs_block, dict):
+            certs_block = {}
+        certs_block["ImportEnterpriseRoots"] = True
+        install_list = certs_block.get("Install")
+        if not isinstance(install_list, list):
+            install_list = []
+        if cert_path not in install_list:
+            install_list.append(cert_path)
+        certs_block["Install"] = install_list
+        policies["Certificates"] = certs_block
+
+        # Deep merge SecurityDevices
+        sec_devices = policies.get("SecurityDevices")
+        if not isinstance(sec_devices, dict):
+            sec_devices = {}
+        sec_devices["DoD CAC"] = module_path
+        sec_devices.pop("DoW CAC", None)
+        policies["SecurityDevices"] = sec_devices
+
+        # Deep merge Preferences
+        prefs = policies.get("Preferences")
+        if not isinstance(prefs, dict):
+            prefs = {}
+        prefs["security.default_personal_cert"] = "Ask Every Time"
+        prefs["security.enterprise_roots.enabled"] = True
+        policies["Preferences"] = prefs
+
+        existing_data["policies"] = policies
+        content = json.dumps(existing_data, indent=2)
+
+        with tempfile.NamedTemporaryFile(mode="w", dir=target_dir, delete=False, encoding="utf-8") as f_out:
+            tmp_name = f_out.name
+            f_out.write(content)
+        os.chmod(tmp_name, 0o644)
+        os.replace(tmp_name, target)
+        log(f"Configured Firefox policy in {target}")
+        return True
+    except Exception as e:
+        log(f"Firefox policy note for {target}: {e}")
+        return False
+
+
+def revert_firefox_policy_file(target: str) -> bool:
+    """Remove only Sentinel-managed keys from a Firefox policies.json file.
+
+    Preserves all unrelated enterprise policies (Homepage, Proxy, Extensions,
+    Telemetry, third-party SecurityDevices or Certificates). Deletes the file
+    only if no policies or top-level keys remain.
+    """
+    if not os.path.isfile(target):
+        return True
+
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return True
+
+        policies = data.get("policies")
+        if isinstance(policies, dict):
+            # 1. Clean SecurityDevices
+            sec_devices = policies.get("SecurityDevices")
+            if isinstance(sec_devices, dict):
+                sec_devices.pop("DoD CAC", None)
+                sec_devices.pop("DoW CAC", None)
+                if not sec_devices:
+                    policies.pop("SecurityDevices", None)
+
+            # 2. Clean Certificates
+            certs_block = policies.get("Certificates")
+            if isinstance(certs_block, dict):
+                install_list = certs_block.get("Install")
+                if isinstance(install_list, list):
+                    install_list = [
+                        c
+                        for c in install_list
+                        if not any(
+                            k in str(c)
+                            for k in ("DoD_Full_Chain", "DoW_Full_Chain", "DoD_Roots", "DoW_Roots", "/usr/share/sentinel/")
+                        )
+                    ]
+                    if install_list:
+                        certs_block["Install"] = install_list
+                    else:
+                        certs_block.pop("Install", None)
+
+                if "Install" not in certs_block and certs_block.get("ImportEnterpriseRoots") is True:
+                    if len(certs_block) == 1:
+                        certs_block.pop("ImportEnterpriseRoots", None)
+
+                if not certs_block:
+                    policies.pop("Certificates", None)
+
+            # 3. Clean Preferences added by Sentinel
+            prefs = policies.get("Preferences")
+            if isinstance(prefs, dict):
+                if prefs.get("security.default_personal_cert") == "Ask Every Time":
+                    prefs.pop("security.default_personal_cert", None)
+                if prefs.get("security.enterprise_roots.enabled") is True:
+                    prefs.pop("security.enterprise_roots.enabled", None)
+                if not prefs:
+                    policies.pop("Preferences", None)
+
+        # Only delete the file if policies is completely empty AND no other top-level keys exist
+        other_top_keys = [k for k in data.keys() if k != "policies"]
+        if not policies and not other_top_keys:
+            os.remove(target)
+            log(f"Removed empty Firefox policy file: {target}")
+        else:
+            target_dir = os.path.dirname(target)
+            content = json.dumps(data, indent=2)
+            with tempfile.NamedTemporaryFile(mode="w", dir=target_dir, delete=False, encoding="utf-8") as f_out:
+                tmp_name = f_out.name
+                f_out.write(content)
+            os.chmod(tmp_name, 0o644)
+            os.replace(tmp_name, target)
+            log(f"Cleaned Sentinel entries while preserving existing enterprise policies in {target}")
+        return True
+    except Exception as e:
+        log(f"Note reverting policy {target}: {e}")
+        return False
+
+
+def install_firefox_policies(module_path: str, distro_family: str) -> bool:
+    validated_mod = validate_pkcs11_module_path(module_path)
+    if not validated_mod:
+        return False
+
+    log("Installing Firefox Enterprise Policies with safe deep merge...")
     cert_path = (
         "/usr/share/sentinel/certificates/DoD_Full_Chain.pem"
         if os.path.isfile("/usr/share/sentinel/certificates/DoD_Full_Chain.pem")
         else FULL_CHAIN_PEM
     )
 
-    policy_targets = [
-        "/etc/firefox/policies/policies.json",
-        "/usr/lib/firefox/distribution/policies.json",
-        "/usr/lib64/firefox/distribution/policies.json",
-    ]
-    # Check Snap policy directory
-    if os.path.isdir("/var/snap/firefox/common"):
+    # Always write to /etc/firefox/policies/policies.json (standard non-package-clobbered location).
+    # Only touch /usr/lib*/firefox/distribution or snap if their parent directory already exists,
+    # avoiding creating stray /usr/lib64 directories on Debian/Ubuntu.
+    policy_targets = ["/etc/firefox/policies/policies.json"]
+    for optional_dir in [
+        "/usr/lib/firefox/distribution",
+        "/usr/lib64/firefox/distribution",
+        "/var/snap/firefox/common/policies",
+    ]:
+        if os.path.isdir(optional_dir):
+            policy_targets.append(os.path.join(optional_dir, "policies.json"))
+    if os.path.isdir("/var/snap/firefox/common") and "/var/snap/firefox/common/policies/policies.json" not in policy_targets:
         policy_targets.append("/var/snap/firefox/common/policies/policies.json")
 
+    any_ok = False
     for target in policy_targets:
-        try:
-            target_dir = os.path.dirname(target)
-            os.makedirs(target_dir, exist_ok=True)
-            existing_data = {}
-            if os.path.isfile(target):
-                try:
-                    with open(target, "r") as f_ex:
-                        existing_data = json.load(f_ex)
-                except Exception:
-                    existing_data = {}
-
-            policies = existing_data.get("policies", {})
-
-            # Deep merge Certificates
-            certs_block = policies.get("Certificates", {})
-            certs_block["ImportEnterpriseRoots"] = True
-            install_list = certs_block.get("Install", [])
-            if cert_path not in install_list:
-                install_list.append(cert_path)
-            certs_block["Install"] = install_list
-            policies["Certificates"] = certs_block
-
-            # Deep merge SecurityDevices
-            sec_devices = policies.get("SecurityDevices", {})
-            sec_devices["DoD CAC"] = module_path
-            sec_devices.pop("DoW CAC", None)
-            policies["SecurityDevices"] = sec_devices
-
-            # Deep merge Preferences
-            prefs = policies.get("Preferences", {})
-            prefs["security.default_personal_cert"] = "Ask Every Time"
-            prefs["security.enterprise_roots.enabled"] = True
-            policies["Preferences"] = prefs
-
-            existing_data["policies"] = policies
-            content = json.dumps(existing_data, indent=2)
-
-            with tempfile.NamedTemporaryFile(mode="w", dir=target_dir, delete=False) as f_out:
-                tmp_name = f_out.name
-                f_out.write(content)
-            os.chmod(tmp_name, 0o644)
-            os.replace(tmp_name, target)
-            log(f"Configured Firefox policy in {target}")
-        except Exception as e:
-            log(f"Firefox policy note for {target}: {e}")
+        if merge_firefox_policy_file(target, validated_mod, cert_path):
+            any_ok = True
+    return any_ok
 
 
-def install_p11_kit_module(module_path: str):
+def install_p11_kit_module(module_path: str) -> bool:
+    validated_mod = validate_pkcs11_module_path(module_path)
+    if not validated_mod:
+        return False
+
     log("Installing system-wide p11-kit module...")
-    import tempfile
     mod_dir = "/etc/pkcs11/modules"
     os.makedirs(mod_dir, exist_ok=True)
-    mod_file = os.path.join(mod_dir, "opensc.module")
-    content = f"# Added by Sentinel CAC Manager\nmodule: {module_path}\n"
+    # Use sentinel-opensc.module so we never shadow the distribution's own opensc.module
+    mod_file = os.path.join(mod_dir, "sentinel-opensc.module")
+    content = f"# Added by Sentinel CAC Manager\nmodule: {validated_mod}\n"
     try:
-        with tempfile.NamedTemporaryFile(mode="w", dir=mod_dir, delete=False) as f_out:
+        with tempfile.NamedTemporaryFile(mode="w", dir=mod_dir, delete=False, encoding="utf-8") as f_out:
             tmp_name = f_out.name
             f_out.write(content)
         os.chmod(tmp_name, 0o644)
         os.replace(tmp_name, mod_file)
         log(f"Wrote system p11-kit config: {mod_file}")
+
+        # Clean up legacy opensc.module only if it was written by Sentinel
+        legacy_mod = os.path.join(mod_dir, "opensc.module")
+        if os.path.isfile(legacy_mod):
+            try:
+                with open(legacy_mod, "r", encoding="utf-8", errors="replace") as f_leg:
+                    if "Sentinel CAC Manager" in f_leg.read():
+                        os.remove(legacy_mod)
+            except OSError:
+                pass
+        return True
     except Exception as e:
         log(f"p11-kit config note: {e}")
+        return False
 
 
 def connect_snap_firefox():
@@ -598,48 +969,75 @@ def connect_snap_firefox():
         subprocess.run(["snap", "connect", "firefox:pcscd"], capture_output=True)
 
 
-def install_system_packages(distro_family: str):
+def install_system_packages(distro_family: str) -> bool:
     log("Checking and installing system packages via package manager...")
+    pkg_ok = True
     if distro_family == "debian":
         pkgs = [
-            "pcscd", "libpcsclite1", "pcsc-tools", "opensc",
-            "libccid", "libnss3-tools", "openssl", "p11-kit", "p11-kit-modules"
+            "pcscd",
+            "libpcsclite1",
+            "pcsc-tools",
+            "opensc",
+            "libccid",
+            "libnss3-tools",
+            "openssl",
+            "p11-kit",
+            "p11-kit-modules",
+            "python3-cryptography",
         ]
         log(f"Running apt-get install for {len(pkgs)} packages...")
         res = subprocess.run(["apt-get", "install", "-y"] + pkgs, capture_output=True, text=True)
         if res.returncode == 0:
             log("Required middleware packages verified/installed via apt.")
         else:
-            log(f"apt-get note: {res.stderr.strip() or res.stdout.strip()}")
+            log(f"apt-get error: {res.stderr.strip() or res.stdout.strip()}")
+            pkg_ok = False
     elif distro_family == "fedora":
         pkgs = [
-            "pcsc-lite", "pcsc-tools", "opensc", "openssl",
-            "nss-tools", "p11-kit", "ccid"
+            "pcsc-lite",
+            "pcsc-tools",
+            "opensc",
+            "openssl",
+            "nss-tools",
+            "p11-kit",
+            "ccid",
+            "python3-cryptography",
         ]
         log(f"Running dnf install for {len(pkgs)} packages...")
         res = subprocess.run(["dnf", "install", "-y"] + pkgs, capture_output=True, text=True)
         if res.returncode == 0:
             log("Required middleware packages verified/installed via dnf.")
         else:
-            log(f"dnf note: {res.stderr.strip() or res.stdout.strip()}")
+            log(f"dnf error: {res.stderr.strip() or res.stdout.strip()}")
+            pkg_ok = False
     elif distro_family == "arch":
-        pkgs = ["pcsclite", "pcsc-tools", "opensc", "openssl", "nss", "p11-kit", "ccid"]
+        pkgs = ["pcsclite", "pcsc-tools", "opensc", "openssl", "nss", "p11-kit", "ccid", "python-cryptography"]
         log(f"Running pacman -S --needed for {len(pkgs)} packages...")
         res = subprocess.run(["pacman", "-S", "--needed", "--noconfirm"] + pkgs, capture_output=True, text=True)
         if res.returncode == 0:
             log("Required middleware packages verified/installed via pacman.")
         else:
-            log(f"pacman note: {res.stderr.strip() or res.stdout.strip()}")
+            log(f"pacman error: {res.stderr.strip() or res.stdout.strip()}")
+            pkg_ok = False
     elif distro_family == "suse":
-        pkgs = ["pcsc-lite", "pcsc-tools", "opensc", "openssl", "mozilla-nss-tools", "p11-kit", "pcsc-ccid"]
+        pkgs = [
+            "pcsc-lite",
+            "pcsc-tools",
+            "opensc",
+            "openssl",
+            "mozilla-nss-tools",
+            "p11-kit",
+            "pcsc-ccid",
+            "python3-cryptography",
+        ]
         log(f"Running zypper install for {len(pkgs)} packages...")
         res = subprocess.run(["zypper", "--non-interactive", "install"] + pkgs, capture_output=True, text=True)
         if res.returncode == 0:
             log("Required middleware packages verified/installed via zypper.")
         else:
-            log(f"zypper note: {res.stderr.strip() or res.stdout.strip()}")
+            log(f"zypper error: {res.stderr.strip() or res.stdout.strip()}")
+            pkg_ok = False
 
-    # Reload and trigger udev USB rules so pcscd user gains immediate access to connected readers
     log("Reloading and triggering udev rules for smart card readers...")
     try:
         subprocess.run(["udevadm", "control", "--reload-rules"], capture_output=True)
@@ -647,159 +1045,20 @@ def install_system_packages(distro_family: str):
     except Exception as e:
         log(f"udevadm trigger note: {e}")
 
-
-def enable_smartcard_logon(target_user: Optional[str], edipi: Optional[str], distro_family: str) -> bool:
-    """Configure operating system smart card workstation logon via SSSD and PAM."""
-    log(f"Configuring workstation smart card logon for user '{target_user or 'all'}'...")
-
-    # 1. Ensure SSSD PKI CA database directory exists
-    sssd_pki_dir = "/etc/sssd/pki"
-    os.makedirs(sssd_pki_dir, mode=0o755, exist_ok=True)
-    sssd_ca_db = os.path.join(sssd_pki_dir, "sssd_auth_ca_db.pem")
-
-    # Deploy DoD roots as trusted CAs for SSSD
-    roots_pem = os.path.join(CERTS_DIR, "DoD_Roots.pem")
-    if os.path.isfile(roots_pem):
-        _write_secure_cert(roots_pem, sssd_ca_db, CERTS_DIR)
-    else:
-        chain_pem = os.path.join(CERTS_DIR, "DoD_Full_Chain.pem")
-        if os.path.isfile(chain_pem):
-            _write_secure_cert(chain_pem, sssd_ca_db, CERTS_DIR, verify_whitelist=False)
-
-    # 2. Deploy SSSD drop-in configuration
-    sssd_conf_dir = "/etc/sssd/conf.d"
-    os.makedirs(sssd_conf_dir, mode=0o750, exist_ok=True)
-    drop_in_path = os.path.join(sssd_conf_dir, "sentinel-smartcard.conf")
-
-    user_clause = ""
-    if target_user and re.match(r"^[a-zA-Z0-9_\.\-]+$", target_user):
-        clean_user = target_user.strip()
-        if edipi and re.match(r"^[0-9]{10}$", edipi):
-            user_clause = f"\n[certmap/local/{clean_user}]\nmatchrule = <SUBJECT>.*{edipi}.*\n"
-        else:
-            user_clause = f"\n[certmap/local/{clean_user}]\nmatchrule = <SUBJECT>.*CN=.*\n"
-
-    sssd_conf_content = (
-        "# Generated by Sentinel CAC Manager - Workstation Smart Card Logon\n"
-        "[sssd]\n"
-        "enable_files_domain = True\n"
-        "domains = local\n\n"
-        "[domain/local]\n"
-        "id_provider = files\n\n"
-        "[pam]\n"
-        "pam_cert_auth = True\n"
-        f"pam_cert_db_path = {sssd_ca_db}\n"
-        f"{user_clause}"
-    )
-
-    try:
-        import tempfile
-        with tempfile.NamedTemporaryFile(dir=sssd_conf_dir, delete=False, mode="w") as f_tmp:
-            temp_path = f_tmp.name
-            f_tmp.write(sssd_conf_content)
-        os.chmod(temp_path, 0o600)
-        os.replace(temp_path, drop_in_path)
-        log(f"Wrote SSSD smartcard configuration to {drop_in_path}")
-    except Exception as e:
-        log(f"ERROR: Failed to write SSSD drop-in config: {e}")
-        return False
-
-    # 3. Configure PAM via authselect (Fedora / RHEL) or pam-auth-update (Debian / Ubuntu)
-    authselect_bin = shutil.which("authselect")
-    if authselect_bin and distro_family in ("fedora", "rhel", "centos"):
-        try:
-            p_list = subprocess.run([authselect_bin, "backup-list"], capture_output=True, text=True)
-            has_backup = "sentinel_backup" in p_list.stdout
-
-            cmd = [authselect_bin, "select", "sssd", "with-smartcard", "with-smartcard-lock-on-removal", "--force"]
-            if not has_backup:
-                cmd.append("--backup=sentinel_backup")
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode == 0:
-                log("Configured authselect profile 'sssd with-smartcard with-smartcard-lock-on-removal'.")
-            else:
-                log(f"Warning: authselect returned {res.returncode}: {res.stderr.strip()}")
-        except Exception as e:
-            log(f"Warning: Could not configure authselect: {e}")
-    elif distro_family == "debian":
-        pam_update = shutil.which("pam-auth-update")
-        if pam_update:
-            try:
-                subprocess.run([pam_update, "--enable", "sss"], capture_output=True, timeout=5)
-                log("Configured pam-auth-update for SSSD.")
-            except Exception as e:
-                log(f"Warning: pam-auth-update invocation failed: {e}")
-
-    # 4. Enable and restart SSSD and PC/SC daemons
-    systemctl = shutil.which("systemctl")
-    if systemctl:
-        try:
-            subprocess.run([systemctl, "enable", "--now", "sssd", "pcscd.socket", "pcscd"], capture_output=True, timeout=5)
-            subprocess.run([systemctl, "restart", "sssd"], capture_output=True, timeout=5)
-            log("Restarted sssd and pcscd services.")
-        except Exception as e:
-            log(f"Warning: systemctl restart sssd failed: {e}")
-
-    log("Workstation smart card logon configured successfully (password fallback retained).")
-    return True
-
-
-def disable_smartcard_logon(distro_family: str) -> bool:
-    """Disable operating system smart card logon and revert PAM configuration."""
-    log("Disabling workstation smart card logon and reverting authentication stack...")
-
-    # 1. Remove SSSD drop-in configuration
-    drop_in_path = "/etc/sssd/conf.d/sentinel-smartcard.conf"
-    if os.path.isfile(drop_in_path):
-        try:
-            os.remove(drop_in_path)
-            log(f"Removed {drop_in_path}")
-        except OSError as e:
-            log(f"Warning: Could not remove {drop_in_path}: {e}")
-
-    # 2. Revert PAM via authselect
-    authselect_bin = shutil.which("authselect")
-    if authselect_bin and distro_family in ("fedora", "rhel", "centos"):
-        try:
-            p_list = subprocess.run([authselect_bin, "backup-list"], capture_output=True, text=True)
-            if "sentinel_backup" in p_list.stdout:
-                res_rst = subprocess.run([authselect_bin, "backup-restore", "sentinel_backup"], capture_output=True, text=True)
-                if res_rst.returncode == 0:
-                    subprocess.run([authselect_bin, "backup-remove", "sentinel_backup"], capture_output=True)
-                    log("Restored previous PAM profile from sentinel_backup.")
-                else:
-                    log(f"Warning: authselect backup-restore failed: {res_rst.stderr.strip()}")
-            else:
-                subprocess.run([authselect_bin, "disable-feature", "with-smartcard"], capture_output=True)
-                subprocess.run([authselect_bin, "disable-feature", "with-smartcard-lock-on-removal"], capture_output=True)
-                subprocess.run([authselect_bin, "apply-changes"], capture_output=True)
-                log("Disabled smartcard features in authselect profile.")
-        except Exception as e:
-            log(f"Warning: authselect restore failed: {e}")
-
-    # 3. Restart / Reload SSSD
-    systemctl = shutil.which("systemctl")
-    if systemctl:
-        try:
-            subprocess.run([systemctl, "restart", "sssd"], capture_output=True, timeout=5)
-        except Exception:
-            pass
-
-    log("Workstation smart card logon disabled and system restored.")
-    return True
+    return pkg_ok
 
 
 def uninstall_system_configuration(distro_family: str) -> bool:
-    """Revert Sentinel system configuration, remove DoD CAs, and restore policies."""
+    """Revert Sentinel system configuration, remove Sentinel-installed DoD CAs, and restore policies."""
     log("Reverting Sentinel CAC Manager system configuration and removing trust...")
     all_ok = True
 
-    # 1. Remove system CA certificates
+    # 1. Remove ONLY Sentinel-owned system CA certificates (never rmtree shared directories)
     if distro_family == "debian":
         for d in ["/usr/local/share/ca-certificates/dod", "/usr/local/share/ca-certificates/dow"]:
             if os.path.isdir(d):
-                shutil.rmtree(d, ignore_errors=True)
-                log(f"Removed certificate directory {d}")
+                removed = _clean_sentinel_owned_certs_in_dir(d, keep_roots=False)
+                log(f"Removed {removed} Sentinel-managed certificate(s) from {d}")
         res = subprocess.run(["update-ca-certificates", "--fresh"], capture_output=True, text=True)
         log(f"Rebuilt system CA trust store: {res.stdout.strip()}")
         if res.returncode != 0:
@@ -818,7 +1077,7 @@ def uninstall_system_configuration(distro_family: str) -> bool:
         if res.returncode != 0:
             all_ok = False
     elif distro_family == "arch":
-        for old in ["DoD_Roots.pem", "DoD_Full_Chain.pem"]:
+        for old in ["DoD_Roots.pem", "DoD_Full_Chain.pem", "DoW_Roots.pem", "DoW_Full_Chain.pem"]:
             p = os.path.join("/etc/ca-certificates/trust-source/anchors", old)
             if os.path.isfile(p):
                 try:
@@ -831,7 +1090,7 @@ def uninstall_system_configuration(distro_family: str) -> bool:
         if res.returncode != 0:
             all_ok = False
     elif distro_family == "suse":
-        for old in ["DoD_Roots.pem", "DoD_Full_Chain.pem"]:
+        for old in ["DoD_Roots.pem", "DoD_Full_Chain.pem", "DoW_Roots.pem", "DoW_Full_Chain.pem"]:
             p = os.path.join("/etc/pki/trust/anchors", old)
             if os.path.isfile(p):
                 try:
@@ -844,12 +1103,17 @@ def uninstall_system_configuration(distro_family: str) -> bool:
         if res.returncode != 0:
             all_ok = False
 
-    # Remove application certificates copy
+    # Remove application certificates copy in /usr/share/sentinel
     if os.path.isdir("/usr/share/sentinel/certificates"):
         shutil.rmtree("/usr/share/sentinel/certificates", ignore_errors=True)
         log("Removed /usr/share/sentinel/certificates")
+        if os.path.isdir("/usr/share/sentinel") and not os.listdir("/usr/share/sentinel"):
+            try:
+                os.rmdir("/usr/share/sentinel")
+            except OSError:
+                pass
 
-    # 2. Revert Firefox enterprise policies
+    # 2. Revert Firefox enterprise policies non-destructively
     policy_targets = [
         "/etc/firefox/policies/policies.json",
         "/usr/lib/firefox/distribution/policies.json",
@@ -857,44 +1121,20 @@ def uninstall_system_configuration(distro_family: str) -> bool:
         "/var/snap/firefox/common/policies/policies.json",
     ]
     for target in policy_targets:
-        if os.path.isfile(target):
-            try:
-                with open(target, "r") as f:
-                    data = json.load(f)
-                policies = data.get("policies", {})
-                sec_devices = policies.get("SecurityDevices", {})
-                sec_devices.pop("DoD CAC", None)
-                sec_devices.pop("DoW CAC", None)
-                certs_block = policies.get("Certificates", {})
-                install_list = certs_block.get("Install", [])
-                install_list = [c for c in install_list if "DoD" not in c and "DoW" not in c and "sentinel" not in c]
-                if install_list:
-                    certs_block["Install"] = install_list
-                else:
-                    certs_block.pop("Install", None)
-
-                # Check if policies block is effectively empty
-                if not sec_devices and not install_list:
-                    os.remove(target)
-                    log(f"Removed empty Firefox policy file: {target}")
-                else:
-                    with open(target, "w") as f:
-                        json.dump(data, f, indent=2)
-                    log(f"Cleaned Sentinel policies from {target}")
-            except Exception as e:
-                log(f"Note reverting policy {target}: {e}")
+        if not revert_firefox_policy_file(target):
+            all_ok = False
 
     # 3. Revert system p11-kit module
-    p11_file = "/etc/pkcs11/modules/opensc.module"
-    if os.path.isfile(p11_file):
-        try:
-            with open(p11_file, "r") as f:
-                c = f.read()
-            if "Sentinel" in c:
-                os.remove(p11_file)
-                log(f"Removed system p11-kit module config: {p11_file}")
-        except Exception:
-            pass
+    for p11_file in ["/etc/pkcs11/modules/sentinel-opensc.module", "/etc/pkcs11/modules/opensc.module"]:
+        if os.path.isfile(p11_file):
+            try:
+                with open(p11_file, "r", encoding="utf-8", errors="replace") as f:
+                    c = f.read()
+                if "Sentinel" in c or os.path.basename(p11_file) == "sentinel-opensc.module":
+                    os.remove(p11_file)
+                    log(f"Removed system p11-kit module config: {p11_file}")
+            except Exception:
+                pass
 
     # 4. Revert OpenSC config if backup exists
     for conf_cand in ["/etc/opensc/opensc.conf", "/etc/opensc.conf"]:
@@ -907,7 +1147,24 @@ def uninstall_system_configuration(distro_family: str) -> bool:
             except Exception as e:
                 log(f"Note restoring OpenSC config: {e}")
 
-    # 5. Remove helper from /usr/libexec/sentinel
+    # 5. Clean up any legacy SSSD drop-in if present from an earlier version
+    legacy_sssd_dropin = "/etc/sssd/conf.d/sentinel-smartcard.conf"
+    if os.path.isfile(legacy_sssd_dropin):
+        try:
+            os.remove(legacy_sssd_dropin)
+            log(f"Removed legacy {legacy_sssd_dropin}")
+        except OSError:
+            pass
+
+    # 6. Remove Polkit policy and helper from /usr/libexec/sentinel
+    polkit_policy = "/usr/share/polkit-1/actions/com.codefxr.sentinel.policy"
+    if os.path.isfile(polkit_policy):
+        try:
+            os.remove(polkit_policy)
+            log(f"Removed {polkit_policy}")
+        except OSError:
+            pass
+
     helper_path = "/usr/libexec/sentinel/privileged_helper.py"
     if os.path.isfile(helper_path):
         try:
@@ -918,9 +1175,6 @@ def uninstall_system_configuration(distro_family: str) -> bool:
         except Exception:
             pass
 
-    # 6. Revert workstation smartcard logon if configured
-    disable_smartcard_logon(distro_family)
-
     log("System-level uninstallation and trust rollback complete.")
     return all_ok
 
@@ -928,7 +1182,7 @@ def uninstall_system_configuration(distro_family: str) -> bool:
 def main():
     parser = argparse.ArgumentParser(description="Sentinel Root Helper")
     parser.add_argument("--family", default="debian", help="distro family (debian/fedora/arch/suse)")
-    parser.add_argument("--module", default="/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so", help="path to opensc module")
+    parser.add_argument("--module", default=None, help="path to opensc module")
     parser.add_argument("--certs-dir", default=None, help="path to source certificates directory")
     parser.add_argument("--all", action="store_true", help="run all root setup steps")
     parser.add_argument("--packages", action="store_true", help="install system packages")
@@ -936,10 +1190,6 @@ def main():
     parser.add_argument("--service", action="store_true", help="enable pcscd only")
     parser.add_argument("--reader-fix", action="store_true", help="fix opensc.conf only")
     parser.add_argument("--policies", action="store_true", help="install policies only")
-    parser.add_argument("--logon", action="store_true", help="enable workstation smart card logon")
-    parser.add_argument("--disable-logon", action="store_true", help="disable workstation smart card logon")
-    parser.add_argument("--target-user", default=None, help="target local username for logon mapping")
-    parser.add_argument("--edipi", default=None, help="cardholder EDIPI / DoD ID for logon mapping")
     parser.add_argument("--sync-helper", action="store_true", help="install/sync helper into /usr/libexec/sentinel")
     parser.add_argument("--uninstall", action="store_true", help="revert system changes and remove DoD trust")
 
@@ -968,8 +1218,9 @@ def main():
     if args.sync_helper:
         ensure_system_helper()
 
+    pkgs_ok = True
     if args.packages or args.all:
-        install_system_packages(args.family)
+        pkgs_ok = install_system_packages(args.family)
 
     if args.all or args.service:
         enable_pcscd()
@@ -981,25 +1232,30 @@ def main():
     if args.all or args.certs:
         certs_ok = install_system_certificates(args.family)
 
-    if args.disable_logon:
-        ok = disable_smartcard_logon(args.family)
-        return 0 if ok else 1
-
-    if args.logon:
-        ok = enable_smartcard_logon(args.target_user, args.edipi, args.family)
-        return 0 if ok else 1
-
+    policies_ok = True
     if args.all or args.policies:
-        install_firefox_policies(args.module, args.family)
-        install_p11_kit_module(args.module)
+        mod_path = validate_pkcs11_module_path(args.module)
+        if not mod_path:
+            log("ERROR: Invalid PKCS#11 module path supplied.")
+            return 3
+        ff_ok = install_firefox_policies(mod_path, args.family)
+        p11_ok = install_p11_kit_module(mod_path)
+        policies_ok = ff_ok and p11_ok
         connect_snap_firefox()
 
-    # Final warm ATR sync to ensure card is immediately ready
     reset_smartcard_atr()
+
+    if not pkgs_ok:
+        log("ERROR: System middleware package installation failed.")
+        return 4
 
     if not certs_ok:
         log("ERROR: Certificate installation into system trust store encountered errors.")
         return 2
+
+    if not policies_ok:
+        log("ERROR: Browser policy or PKCS#11 module installation encountered errors.")
+        return 3
 
     log("Elevated system configuration complete!")
     return 0

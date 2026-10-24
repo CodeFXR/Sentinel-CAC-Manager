@@ -153,23 +153,23 @@ class DashboardView(Gtk.Box):
         self.id_group.add(self.holder_row)
 
         self.edipi_row = Adw.ActionRow(title="DoD ID Number (EDIPI)")
-        self.edipi_row.set_subtitle("—")
+        self.edipi_row.set_subtitle("-")
         self.id_group.add(self.edipi_row)
 
         self.cert_status_row = Adw.ActionRow(title="PIV Certificate Status")
-        self.cert_status_row.set_subtitle("—")
+        self.cert_status_row.set_subtitle("-")
         self.id_group.add(self.cert_status_row)
 
         self.pin_status_row = Adw.ActionRow(title="PIV PIN Status")
-        self.pin_status_row.set_subtitle("—")
-        self.pin_badge = Gtk.Label(label="—")
+        self.pin_status_row.set_subtitle("-")
+        self.pin_badge = Gtk.Label(label="-")
         self.pin_badge.add_css_class("badge-info")
         self.pin_status_row.add_suffix(self.pin_badge)
         self.id_group.add(self.pin_status_row)
 
-        self.logon_status_row = Adw.ActionRow(title="Workstation OS Logon")
-        self.logon_status_row.set_subtitle("—")
-        self.logon_badge = Gtk.Label(label="—")
+        self.logon_status_row = Adw.ActionRow(title="Session Lock on Removal")
+        self.logon_status_row.set_subtitle("-")
+        self.logon_badge = Gtk.Label(label="-")
         self.logon_badge.add_css_class("badge-info")
         self.logon_status_row.add_suffix(self.logon_badge)
         self.id_group.add(self.logon_status_row)
@@ -179,15 +179,15 @@ class DashboardView(Gtk.Box):
     def update_status(self, card_stat: SmartCardStatus, system_ready: bool):
         # Update Banner
         if system_ready and card_stat.card_present:
-            self.status_banner.set_label("System Ready — DoD CAC Ready for Browser Authentication")
+            self.status_banner.set_label("System Ready: DoD CAC Ready for Browser Authentication")
             self.status_banner.remove_css_class("banner-warning")
             self.status_banner.add_css_class("banner-ready")
         elif not system_ready:
-            self.status_banner.set_label("Setup Required — Click 'Automate Full CAC Setup' Below")
+            self.status_banner.set_label("Setup Required: Click 'Automate Full CAC Setup' Below")
             self.status_banner.remove_css_class("banner-ready")
             self.status_banner.add_css_class("banner-warning")
         else:
-            self.status_banner.set_label("System Configured — Insert CAC into Reader to Authenticate")
+            self.status_banner.set_label("System Configured: Insert CAC into Reader to Authenticate")
             self.status_banner.remove_css_class("banner-ready")
             self.status_banner.add_css_class("banner-warning")
 
@@ -232,8 +232,8 @@ class DashboardView(Gtk.Box):
             self.cert_status_row.set_subtitle(f"{s_text} (Issuer: {i_cn})")
         else:
             self.holder_row.set_subtitle("Insert CAC into reader to read identity")
-            self.edipi_row.set_subtitle("—")
-            self.cert_status_row.set_subtitle("—")
+            self.edipi_row.set_subtitle("-")
+            self.cert_status_row.set_subtitle("-")
 
         # Update PIN Status
         if card_stat.card_present:
@@ -260,26 +260,26 @@ class DashboardView(Gtk.Box):
                 self.pin_badge.set_label("Unchecked")
                 self.pin_badge.add_css_class("badge-info")
         else:
-            self.pin_status_row.set_subtitle("—")
-            self.pin_badge.set_label("—")
+            self.pin_status_row.set_subtitle("-")
+            self.pin_badge.set_label("-")
             self.pin_badge.remove_css_class("badge-success")
             self.pin_badge.remove_css_class("badge-warning")
             self.pin_badge.remove_css_class("badge-danger")
             self.pin_badge.add_css_class("badge-info")
 
-        # Update Workstation Logon Status
+        # Update Session Lock on Removal Status
         from core.system_fix import check_smartcard_logon_status
         l_stat = check_smartcard_logon_status()
         self.logon_badge.remove_css_class("badge-info")
         self.logon_badge.remove_css_class("badge-success")
         self.logon_badge.remove_css_class("badge-warning")
 
-        if l_stat["logon_enabled"]:
-            self.logon_status_row.set_subtitle("Enabled (SSSD/PAM smart card authentication with password fallback)")
-            self.logon_badge.set_label("Ready")
+        if l_stat["lock_removal_enabled"]:
+            self.logon_status_row.set_subtitle("Active (Workstation screen locks when CAC is removed)")
+            self.logon_badge.set_label("Active")
             self.logon_badge.add_css_class("badge-success")
         else:
-            self.logon_status_row.set_subtitle("Not configured (Configure in System tab)")
+            self.logon_status_row.set_subtitle("Inactive (Configure in System & Browsers tab)")
             self.logon_badge.set_label("Inactive")
             self.logon_badge.add_css_class("badge-info")
 
@@ -321,4 +321,4 @@ class DashboardView(Gtk.Box):
             self.step_label.set_label(f"Setup Error: {result.get('message', 'Failed')}")
             self.main_window.show_toast(f"Setup Warning: {result.get('message', 'Check logs')}")
 
-        self.main_window.refresh_all_status()
+        self.main_window.refresh_all_status(force=True)

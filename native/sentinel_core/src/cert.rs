@@ -138,7 +138,9 @@ pub fn parse_der_or_pem_bytes(
     let not_after_ts = not_after.timestamp();
 
     let is_valid = now_ts >= not_before_ts && now_ts <= not_after_ts;
-    let status_text = if now_ts > not_after_ts {
+    let status_text = if now_ts < not_before_ts {
+        format!("Not Yet Valid (Valid from {})", valid_from_str)
+    } else if now_ts > not_after_ts {
         "Expired".to_string()
     } else {
         let remaining_days = (not_after_ts - now_ts) / 86400;

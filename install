@@ -16,7 +16,10 @@ if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
 fi
 
 INSTALL_DIR="${TARGET_HOME}/.local/share/sentinel_cac_manager"
-REPO_URL="https://github.com/CodeFXR/Sentinel-CAC-Manager/archive/refs/heads/main.tar.gz"
+RELEASE_TAG="v2.0.1"
+REPO_URL="https://github.com/CodeFXR/Sentinel-CAC-Manager/archive/refs/tags/${RELEASE_TAG}.tar.gz"
+# Optional override via SENTINEL_ARCHIVE_SHA256 for verified standalone web bootstrap
+EXPECTED_ARCHIVE_SHA256="${SENTINEL_ARCHIVE_SHA256:-}"
 
 # 1. Determine if running inside a verified local checkout
 IS_LOCAL=0
@@ -33,19 +36,39 @@ if [[ "${TARGET_HOME}" =~ [$'\r\n'] ]] || [[ "${SCRIPT_DIR:-}" =~ [$'\r\n'] ]] |
     exit 1
 fi
 
-# 2. Standalone web bootstrapper mode: fetch repo into ~/.local/share/sentinel_cac_manager
+# 2. Standalone web bootstrapper mode: fetch pinned release archive and verify SHA-256
 if [ "$IS_LOCAL" -eq 0 ]; then
-    echo "[*] Initializing Sentinel CAC Manager installer..."
-    echo "[*] Downloading application to ${INSTALL_DIR}..."
-    mkdir -p "${INSTALL_DIR}"
+    echo "[*] Initializing Sentinel CAC Manager (${RELEASE_TAG}) installer..."
+    if [ -z "${EXPECTED_ARCHIVE_SHA256}" ]; then
+        echo "[-] Error: Standalone remote bootstrap requires SENTINEL_ARCHIVE_SHA256 to verify release integrity." >&2
+        echo "[-] Download the verified ${RELEASE_TAG} release archive and run ./install from the extracted directory," >&2
+        echo "[-] or export SENTINEL_ARCHIVE_SHA256=<sha256> before running the bootstrapper." >&2
+        exit 1
+    fi
+    TMP_ARCHIVE="$(mktemp /tmp/sentinel_release.XXXXXX.tar.gz)"
+    trap 'rm -f "${TMP_ARCHIVE}"' EXIT
+    echo "[*] Downloading pinned release ${RELEASE_TAG} from ${REPO_URL}..."
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "${REPO_URL}" | tar -xz -C "${INSTALL_DIR}" --strip-components=1
+        curl -fsSL "${REPO_URL}" -o "${TMP_ARCHIVE}"
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO- "${REPO_URL}" | tar -xz -C "${INSTALL_DIR}" --strip-components=1
+        wget -qO "${TMP_ARCHIVE}" "${REPO_URL}"
     else
         echo "[-] Error: curl or wget is required to download Sentinel CAC Manager." >&2
         exit 1
     fi
+    ACTUAL_SHA256="$(sha256sum "${TMP_ARCHIVE}" | awk '{print $1}')"
+    if [ "${ACTUAL_SHA256}" != "${EXPECTED_ARCHIVE_SHA256}" ]; then
+        echo "[-] CRITICAL: Archive SHA-256 mismatch!" >&2
+        echo "    Expected: ${EXPECTED_ARCHIVE_SHA256}" >&2
+        echo "    Actual:   ${ACTUAL_SHA256}" >&2
+        rm -f "${TMP_ARCHIVE}"
+        exit 1
+    fi
+    echo "[+] Verified release archive SHA-256: ${ACTUAL_SHA256}"
+    mkdir -p "${INSTALL_DIR}"
+    tar -xzf "${TMP_ARCHIVE}" -C "${INSTALL_DIR}" --strip-components=1
+    rm -f "${TMP_ARCHIVE}"
+    trap - EXIT
     if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
         chown -R "${SUDO_USER}:" "${INSTALL_DIR}" 2>/dev/null || true
     fi
@@ -72,19 +95,19 @@ fi
 # Define required system packages for each distribution family
 case "${FAMILY}" in
     debian)
-        REQUIRED_PKGS=(pcscd libpcsclite1 pcsc-tools opensc libccid libnss3-tools openssl p11-kit p11-kit-modules python3-gi gir1.2-gtk-4.0 gir1.2-adw-1)
+        REQUIRED_PKGS=(pcscd libpcsclite1 pcsc-tools opensc libccid libnss3-tools openssl p11-kit p11-kit-modules python3-cryptography python3-gi gir1.2-gtk-4.0 gir1.2-adw-1)
         ;;
     fedora)
-        REQUIRED_PKGS=(pcsc-lite pcsc-tools opensc openssl nss-tools p11-kit ccid python3-gobject gtk4 libadwaita)
+        REQUIRED_PKGS=(pcsc-lite pcsc-tools opensc openssl nss-tools p11-kit ccid python3-cryptography python3-gobject gtk4 libadwaita)
         ;;
     arch)
-        REQUIRED_PKGS=(pcsclite pcsc-tools opensc openssl nss p11-kit ccid python-gobject gtk4 libadwaita)
+        REQUIRED_PKGS=(pcsclite pcsc-tools opensc openssl nss p11-kit ccid python-cryptography python-gobject gtk4 libadwaita)
         ;;
     suse)
-        REQUIRED_PKGS=(pcsc-lite pcsc-tools opensc openssl mozilla-nss-tools p11-kit pcsc-ccid python3-gobject gtk4 typelib-1_0-Adw-1)
+        REQUIRED_PKGS=(pcsc-lite pcsc-tools opensc openssl mozilla-nss-tools p11-kit pcsc-ccid python3-cryptography python3-gobject gtk4 typelib-1_0-Adw-1)
         ;;
     *)
-        REQUIRED_PKGS=(pcscd opensc openssl libnss3-tools python3-gi)
+        REQUIRED_PKGS=(pcscd opensc openssl libnss3-tools python3-cryptography python3-gi)
         ;;
 esac
 
@@ -152,7 +175,16 @@ install_system_deps_and_certs() {
     echo "[+] Deploying protected privileged helper to /usr/libexec/sentinel/..."
     mkdir -p /usr/libexec/sentinel
     cp -f "${SCRIPT_DIR}/core/privileged_helper.py" /usr/libexec/sentinel/privileged_helper.py
+    chown root:root /usr/libexec/sentinel/privileged_helper.py
     chmod 0755 /usr/libexec/sentinel/privileged_helper.py
+
+    # Deploy dedicated Polkit policy action if present
+    if [ -f "${SCRIPT_DIR}/polkit/com.codefxr.sentinel.policy" ]; then
+        mkdir -p /usr/share/polkit-1/actions
+        cp -f "${SCRIPT_DIR}/polkit/com.codefxr.sentinel.policy" /usr/share/polkit-1/actions/com.codefxr.sentinel.policy
+        chown root:root /usr/share/polkit-1/actions/com.codefxr.sentinel.policy
+        chmod 0644 /usr/share/polkit-1/actions/com.codefxr.sentinel.policy
+    fi
 
     # Deploy DoD CA certificates to system directory and validate trust anchors (SEC-01)
     if [ -d "${SCRIPT_DIR}/certificates" ]; then
@@ -161,11 +193,6 @@ install_system_deps_and_certs() {
         cp -rf "${SCRIPT_DIR}/certificates/"* /usr/share/sentinel/certificates/
         chmod -R 0644 /usr/share/sentinel/certificates/* 2>/dev/null || true
         find /usr/share/sentinel/certificates -type d -exec chmod 0755 {} + 2>/dev/null || true
-
-        # Clean legacy dow trust store if present
-        if [ -d /usr/local/share/ca-certificates/dow ]; then
-            rm -rf /usr/local/share/ca-certificates/dow
-        fi
 
         # Install system certificates into trust store via validated privileged helper
         python3 /usr/libexec/sentinel/privileged_helper.py --certs --family "${FAMILY}" --certs-dir /usr/share/sentinel/certificates
@@ -185,13 +212,16 @@ if [ "${1:-}" = "--uninstall" ]; then
     echo "   Sentinel CAC Manager - Uninstallation & Trust Rollback"
     echo "================================================================="
     if [ "$EUID" -ne 0 ]; then
+        echo "[*] Reverting user-level browser configurations, systemd unit, and launchers..."
+        python3 -c "import sys; sys.path.insert(0, '${SCRIPT_DIR}'); from core.agent import uninstall_systemd_user_service; from core.system_fix import uninstall_desktop_integration; uninstall_systemd_user_service(log_fn=print); uninstall_desktop_integration(log_fn=print)" 2>/dev/null || true
         echo "[*] Requesting administrator authorization to remove system trust and policies..."
         elevate_exec --uninstall
-        # Also clean user integration
-        python3 "${SCRIPT_DIR}/cli.py" --uninstall 2>/dev/null || true
         echo "[+] Uninstallation complete."
         exit 0
     else
+        if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+            sudo -u "${SUDO_USER}" env HOME="${TARGET_HOME}" python3 -c "import sys; sys.path.insert(0, '${SCRIPT_DIR}'); from core.agent import uninstall_systemd_user_service; from core.system_fix import uninstall_desktop_integration; uninstall_systemd_user_service(home_dir='${TARGET_HOME}', log_fn=print); uninstall_desktop_integration(home_dir='${TARGET_HOME}', log_fn=print)" 2>/dev/null || true
+        fi
         if [ -f "/usr/libexec/sentinel/privileged_helper.py" ]; then
             python3 /usr/libexec/sentinel/privileged_helper.py --uninstall --family "${FAMILY}"
         elif [ -f "${SCRIPT_DIR}/core/privileged_helper.py" ]; then
@@ -252,9 +282,12 @@ case "${FAMILY}" in
         ;;
 esac
 
-# 6. Check if elevation is required (dependencies missing or helper missing)
+# 6. Check if elevation is required (dependencies missing, helper missing/outdated, or polkit policy missing)
 NEEDS_ROOT=0
-if [ "${#MISSING_PKGS[@]}" -gt 0 ] || [ ! -f "/usr/libexec/sentinel/privileged_helper.py" ]; then
+if [ "${#MISSING_PKGS[@]}" -gt 0 ] \
+    || [ ! -f "/usr/libexec/sentinel/privileged_helper.py" ] \
+    || ! cmp -s "${SCRIPT_DIR}/core/privileged_helper.py" "/usr/libexec/sentinel/privileged_helper.py" \
+    || { [ -f "${SCRIPT_DIR}/polkit/com.codefxr.sentinel.policy" ] && [ ! -f "/usr/share/polkit-1/actions/com.codefxr.sentinel.policy" ]; }; then
     NEEDS_ROOT=1
 fi
 
@@ -440,6 +473,6 @@ echo "   Launch GUI:     sentinel"
 echo "   Command Line:   sentinel --status"
 echo "   PIN Status:     sentinel --pin-status"
 echo "   Full Setup:     sentinel --setup-all"
-echo "   Workstation:    sentinel --setup-logon"
+echo "   Lock on Remove: sentinel --lock-on-removal"
 echo "   Monitor Agent:  sentinel --install-agent"
 echo "================================================================="

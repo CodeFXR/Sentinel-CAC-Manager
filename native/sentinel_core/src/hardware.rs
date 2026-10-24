@@ -65,6 +65,10 @@ type SCardConnectFn = unsafe extern "C" fn(
 
 type SCardDisconnectFn = unsafe extern "C" fn(h_card: i64, dw_disposition: usize) -> i64;
 
+type SCardBeginTransactionFn = unsafe extern "C" fn(h_card: i64) -> i64;
+
+type SCardEndTransactionFn = unsafe extern "C" fn(h_card: i64, dw_disposition: usize) -> i64;
+
 type SCardTransmitFn = unsafe extern "C" fn(
     h_card: i64,
     pio_send_pci: *const SCARD_IO_REQUEST,
@@ -83,6 +87,8 @@ struct PcscSymbols {
     get_status_change: SCardGetStatusChangeFn,
     connect: Option<SCardConnectFn>,
     disconnect: Option<SCardDisconnectFn>,
+    begin_transaction: Option<SCardBeginTransactionFn>,
+    end_transaction: Option<SCardEndTransactionFn>,
     transmit: Option<SCardTransmitFn>,
 }
 
@@ -112,6 +118,14 @@ impl PcscSymbols {
                     if let (Ok(e), Ok(r), Ok(l), Ok(s)) = (establish, release, list, status) {
                         let connect = lib.get(b"SCardConnect").ok().map(|sym: Symbol<SCardConnectFn>| *sym);
                         let disconnect = lib.get(b"SCardDisconnect").ok().map(|sym: Symbol<SCardDisconnectFn>| *sym);
+                        let begin_transaction = lib
+                            .get(b"SCardBeginTransaction")
+                            .ok()
+                            .map(|sym: Symbol<SCardBeginTransactionFn>| *sym);
+                        let end_transaction = lib
+                            .get(b"SCardEndTransaction")
+                            .ok()
+                            .map(|sym: Symbol<SCardEndTransactionFn>| *sym);
                         let transmit = lib.get(b"SCardTransmit").ok().map(|sym: Symbol<SCardTransmitFn>| *sym);
 
                         return Some(PcscSymbols {
@@ -121,6 +135,8 @@ impl PcscSymbols {
                             get_status_change: *s,
                             connect,
                             disconnect,
+                            begin_transaction,
+                            end_transaction,
                             transmit,
                             _lib: lib,
                         });
@@ -588,29 +604,23 @@ pub fn read_piv_certificates_native(reader_opt: Option<&str>) -> Vec<crate::cert
         return results;
     }
 
-    // Select PIV Application (try standard 9-byte AID first, then 11-byte AID)
-    let piv_aid_9 = [0x00, 0xA4, 0x04, 0x00, 0x09, 0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00];
-    let piv_aid_11 = [0x00, 0xA4, 0x04, 0x00, 0x0B, 0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00];
-
-    let select_ok = if let Ok(resp) = transmit_apdu(transmit_fn, h_card, active_proto, &piv_aid_9) {
-        resp.len() >= 2 && (resp[resp.len() - 2] == 0x90 || resp[resp.len() - 2] == 0x61)
+    let in_tx = if let Some(begin_fn) = symbols.begin_transaction {
+        unsafe { begin_fn(h_card) == SCARD_S_SUCCESS }
     } else {
         false
     };
 
-    if !select_ok {
-        let select_11_ok = if let Ok(resp) = transmit_apdu(transmit_fn, h_card, active_proto, &piv_aid_11) {
-            resp.len() >= 2 && (resp[resp.len() - 2] == 0x90 || resp[resp.len() - 2] == 0x61)
-        } else {
-            false
-        };
-        if !select_11_ok {
-            unsafe {
-                disconnect_fn(h_card, SCARD_LEAVE_CARD);
-                (symbols.release_context)(context);
+    if !select_piv_applet(transmit_fn, h_card, active_proto) {
+        unsafe {
+            if in_tx {
+                if let Some(end_fn) = symbols.end_transaction {
+                    let _ = end_fn(h_card, SCARD_LEAVE_CARD);
+                }
             }
-            return results;
+            disconnect_fn(h_card, SCARD_LEAVE_CARD);
+            (symbols.release_context)(context);
         }
+        return results;
     }
 
     // PIV AID selected: Query standard NIST SP 800-73-4 certificate containers
@@ -637,11 +647,35 @@ pub fn read_piv_certificates_native(reader_opt: Option<&str>) -> Vec<crate::cert
     }
 
     unsafe {
+        if in_tx {
+            if let Some(end_fn) = symbols.end_transaction {
+                let _ = end_fn(h_card, SCARD_LEAVE_CARD);
+            }
+        }
         disconnect_fn(h_card, SCARD_LEAVE_CARD);
         (symbols.release_context)(context);
     }
 
     results
+}
+
+fn select_piv_applet(transmit_fn: SCardTransmitFn, h_card: i64, active_proto: usize) -> bool {
+    let piv_aid_9 = [0x00, 0xA4, 0x04, 0x00, 0x09, 0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00];
+    let piv_aid_11 = [0x00, 0xA4, 0x04, 0x00, 0x0B, 0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00];
+
+    if let Ok(resp) = transmit_apdu(transmit_fn, h_card, active_proto, &piv_aid_9) {
+        if resp.len() >= 2 && (resp[resp.len() - 2] == 0x90 || resp[resp.len() - 2] == 0x61) {
+            return true;
+        }
+    }
+
+    if let Ok(resp) = transmit_apdu(transmit_fn, h_card, active_proto, &piv_aid_11) {
+        if resp.len() >= 2 && (resp[resp.len() - 2] == 0x90 || resp[resp.len() - 2] == 0x61) {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn get_reader_list(symbols: &PcscSymbols, context: i64) -> Vec<String> {
@@ -709,11 +743,12 @@ fn resolve_target_reader(symbols: &PcscSymbols, context: i64, reader_opt: Option
     Some(selected)
 }
 
-/// Queries the PIV cardholder PIN retry counter non-destructively.
+/// Queries the PIV cardholder PIN retry counter non-destructively inside a PC/SC transaction.
 ///
 /// Sends an empty VERIFY APDU (00 20 00 80) to Key Reference 0x80 (PIV Cardholder PIN).
 ///
 /// Returns: (is_success, retries_remaining, status_message)
+/// When the PIN is already verified in an active session (0x90 0x00), retries_remaining is 255.
 pub fn query_piv_pin_status(reader_opt: Option<&str>) -> (bool, u8, String) {
     let symbols = match PcscSymbols::try_load() {
         Some(s) => s,
@@ -775,9 +810,24 @@ pub fn query_piv_pin_status(reader_opt: Option<&str>) -> (bool, u8, String) {
         return (false, 0, "Failed to connect to smart card".to_string());
     }
 
-    // Select PIV Application
-    let piv_aid = [0x00, 0xA4, 0x04, 0x00, 0x09, 0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00];
-    let _ = transmit_apdu(transmit_fn, h_card, active_proto, &piv_aid);
+    let in_tx = if let Some(begin_fn) = symbols.begin_transaction {
+        unsafe { begin_fn(h_card) == SCARD_S_SUCCESS }
+    } else {
+        false
+    };
+
+    if !select_piv_applet(transmit_fn, h_card, active_proto) {
+        unsafe {
+            if in_tx {
+                if let Some(end_fn) = symbols.end_transaction {
+                    let _ = end_fn(h_card, SCARD_LEAVE_CARD);
+                }
+            }
+            disconnect_fn(h_card, SCARD_LEAVE_CARD);
+            (symbols.release_context)(context);
+        }
+        return (false, 0, "PIV applet selection failed (non-PIV smart card)".to_string());
+    }
 
     // Send empty VERIFY APDU to query retry counter without consuming an attempt
     let verify_empty = [0x00, 0x20, 0x00, 0x80];
@@ -785,6 +835,11 @@ pub fn query_piv_pin_status(reader_opt: Option<&str>) -> (bool, u8, String) {
         Ok(r) => r,
         Err(e) => {
             unsafe {
+                if in_tx {
+                    if let Some(end_fn) = symbols.end_transaction {
+                        let _ = end_fn(h_card, SCARD_LEAVE_CARD);
+                    }
+                }
                 disconnect_fn(h_card, SCARD_LEAVE_CARD);
                 (symbols.release_context)(context);
             }
@@ -793,6 +848,11 @@ pub fn query_piv_pin_status(reader_opt: Option<&str>) -> (bool, u8, String) {
     };
 
     unsafe {
+        if in_tx {
+            if let Some(end_fn) = symbols.end_transaction {
+                let _ = end_fn(h_card, SCARD_LEAVE_CARD);
+            }
+        }
         disconnect_fn(h_card, SCARD_LEAVE_CARD);
         (symbols.release_context)(context);
     }
@@ -805,7 +865,7 @@ pub fn query_piv_pin_status(reader_opt: Option<&str>) -> (bool, u8, String) {
     let sw2 = resp[resp.len() - 1];
 
     if sw1 == 0x90 && sw2 == 0x00 {
-        (true, 3, "PIN verified (Active session)".to_string())
+        (true, 255, "PIN verified (Active session)".to_string())
     } else if sw1 == 0x63 && (sw2 & 0xF0) == 0xC0 {
         let retries = sw2 & 0x0F;
         if retries == 0 {
@@ -929,9 +989,71 @@ pub fn change_piv_pin_native(
         return (false, 0, "Failed to connect to smart card".to_string());
     }
 
-    // Select PIV Application
-    let piv_aid = [0x00, 0xA4, 0x04, 0x00, 0x09, 0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00];
-    let _ = transmit_apdu(transmit_fn, h_card, active_proto, &piv_aid);
+    let in_tx = if let Some(begin_fn) = symbols.begin_transaction {
+        unsafe { begin_fn(h_card) == SCARD_S_SUCCESS }
+    } else {
+        false
+    };
+
+    if !select_piv_applet(transmit_fn, h_card, active_proto) {
+        old_buf.zeroize();
+        new_buf.zeroize();
+        unsafe {
+            if in_tx {
+                if let Some(end_fn) = symbols.end_transaction {
+                    let _ = end_fn(h_card, SCARD_LEAVE_CARD);
+                }
+            }
+            disconnect_fn(h_card, SCARD_LEAVE_CARD);
+            (symbols.release_context)(context);
+        }
+        return (
+            false,
+            0,
+            "PIV applet selection failed; refusing to send CHANGE REFERENCE DATA to unselected applet".to_string(),
+        );
+    }
+
+    // Verify retry counter inside the transaction before attempting CHANGE REFERENCE DATA
+    let verify_empty = [0x00, 0x20, 0x00, 0x80];
+    if let Ok(v_resp) = transmit_apdu(transmit_fn, h_card, active_proto, &verify_empty) {
+        if v_resp.len() >= 2 {
+            let v_sw1 = v_resp[v_resp.len() - 2];
+            let v_sw2 = v_resp[v_resp.len() - 1];
+            if (v_sw1 == 0x69 && v_sw2 == 0x83) || (v_sw1 == 0x63 && (v_sw2 & 0xF0) == 0xC0 && (v_sw2 & 0x0F) == 0) {
+                old_buf.zeroize();
+                new_buf.zeroize();
+                unsafe {
+                    if in_tx {
+                        if let Some(end_fn) = symbols.end_transaction {
+                            let _ = end_fn(h_card, SCARD_LEAVE_CARD);
+                        }
+                    }
+                    disconnect_fn(h_card, SCARD_LEAVE_CARD);
+                    (symbols.release_context)(context);
+                }
+                return (false, 0, "PIN is locked (0 attempts remaining); PUK unblock required".to_string());
+            }
+            if v_sw1 == 0x63 && (v_sw2 & 0xF0) == 0xC0 && (v_sw2 & 0x0F) == 1 {
+                old_buf.zeroize();
+                new_buf.zeroize();
+                unsafe {
+                    if in_tx {
+                        if let Some(end_fn) = symbols.end_transaction {
+                            let _ = end_fn(h_card, SCARD_LEAVE_CARD);
+                        }
+                    }
+                    disconnect_fn(h_card, SCARD_LEAVE_CARD);
+                    (symbols.release_context)(context);
+                }
+                return (
+                    false,
+                    1,
+                    "Only 1 PIN retry attempt remains; refusing automated PIN change to prevent card lockout".to_string(),
+                );
+            }
+        }
+    }
 
     // Build CHANGE REFERENCE DATA APDU:
     // CLA=00, INS=24, P1=00, P2=80, Lc=10, old_buf(8), new_buf(8)
@@ -955,6 +1077,11 @@ pub fn change_piv_pin_native(
         Err(e) => {
             change_apdu.zeroize();
             unsafe {
+                if in_tx {
+                    if let Some(end_fn) = symbols.end_transaction {
+                        let _ = end_fn(h_card, SCARD_LEAVE_CARD);
+                    }
+                }
                 disconnect_fn(h_card, SCARD_LEAVE_CARD);
                 (symbols.release_context)(context);
             }
@@ -963,6 +1090,11 @@ pub fn change_piv_pin_native(
     };
 
     unsafe {
+        if in_tx {
+            if let Some(end_fn) = symbols.end_transaction {
+                let _ = end_fn(h_card, SCARD_LEAVE_CARD);
+            }
+        }
         disconnect_fn(h_card, SCARD_LEAVE_CARD);
         (symbols.release_context)(context);
     }

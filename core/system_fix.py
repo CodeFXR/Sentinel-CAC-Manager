@@ -1,19 +1,27 @@
-"""System-wide configuration orchestrator and package installer for Sentinel v2."""
+"""System-wide configuration orchestrator and package installer for Sentinel CAC Manager."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
+import shlex
 import shutil
+import stat
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Optional, Dict, Any, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from core.browsers import (
+    check_browsers_status,
+    configure_all_browsers,
+    uninstall_all_browsers,
+)
 from core.platform_detector import PlatformInfo, detect_platform, find_opensc_module
-from core.browsers import configure_all_browsers, check_browsers_status
 from core.smartcard import scan_smartcard
 
 logger = logging.getLogger("sentinel.system_fix")
@@ -23,22 +31,34 @@ HELPER_SCRIPT = os.path.join(SCRIPT_DIR, "core", "privileged_helper.py")
 SYSTEM_HELPER = "/usr/libexec/sentinel/privileged_helper.py"
 
 
-def get_helper_script() -> str:
-    """Return protected root-owned helper if installed, else fallback to repository helper."""
+def get_helper_script(require_root_owned: bool = True) -> Optional[str]:
+    """Return protected root-owned helper in /usr/libexec/sentinel/privileged_helper.py.
+
+    Refuses to fall back to a user-writable repository helper when elevating via pkexec,
+    preventing unprivileged local code execution as root.
+    """
     if os.path.isfile(SYSTEM_HELPER):
         try:
             st = os.stat(SYSTEM_HELPER)
-            if st.st_uid == 0:
+            if st.st_uid == 0 and not (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
                 return SYSTEM_HELPER
         except OSError:
             pass
-    return HELPER_SCRIPT
+
+    if not require_root_owned and os.path.isfile(HELPER_SCRIPT):
+        try:
+            st = os.stat(HELPER_SCRIPT)
+            if not (st.st_mode & stat.S_IWOTH):
+                return HELPER_SCRIPT
+        except OSError:
+            pass
+
+    return None
 
 
 def check_missing_packages(plat: Optional[PlatformInfo] = None) -> List[str]:
     """Check which required binaries or packages are missing."""
     missing = []
-    # Key binaries to check
     binary_checks = [
         ("pcscd", "pcscd"),
         ("opensc-tool", "opensc"),
@@ -58,14 +78,25 @@ def run_privileged_helper(
     timeout: int = 60,
 ) -> Tuple[bool, str]:
     """Run privileged_helper.py via pkexec (or directly if root) with non-blocking timeout handling."""
-    helper_path = get_helper_script()
-    is_root = (os.geteuid() == 0)
+    is_root = os.geteuid() == 0
+    helper_path = get_helper_script(require_root_owned=not is_root)
+    if not helper_path:
+        return (
+            False,
+            "Protected helper /usr/libexec/sentinel/privileged_helper.py is not installed or not root-owned. "
+            "Run './install' first.",
+        )
+
     if is_root:
         cmd = ["python3", helper_path, *args]
     else:
         if not shutil.which("pkexec"):
             return False, "pkexec binary not found. Please run with sudo."
-        cmd = ["pkexec", "python3", helper_path, *args]
+        # Execute the root-owned helper directly so Polkit binds to com.codefxr.sentinel.policy
+        if os.access(helper_path, os.X_OK):
+            cmd = ["pkexec", helper_path, *args]
+        else:
+            cmd = ["pkexec", "python3", helper_path, *args]
 
     if log_fn:
         log_fn("Requesting authorization (Polkit prompt)...")
@@ -92,7 +123,7 @@ def run_privileged_helper(
         except Exception:
             pass
         finally:
-            line_queue.put(None)  # Sentinel indicating EOF
+            line_queue.put(None)
 
     reader_thread = threading.Thread(target=_reader, daemon=True)
     reader_thread.start()
@@ -108,7 +139,7 @@ def run_privileged_helper(
 
         try:
             line = line_queue.get(timeout=min(max(remaining, 0.05), 0.2))
-            if line is None:  # EOF reached
+            if line is None:
                 break
             line_str = line.strip()
             if line_str:
@@ -117,7 +148,6 @@ def run_privileged_helper(
                     log_fn(line_str)
         except queue.Empty:
             if proc.poll() is not None:
-                # Process exited; drain remaining lines
                 while True:
                     try:
                         rem_line = line_queue.get_nowait()
@@ -168,15 +198,9 @@ def run_full_setup(
     progress_callback: Optional[Callable[[float, str], None]] = None,
     log_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
-    """Automate the entire end-to-end DoD CAC setup in one click!
-
-    1. Checks platform & packages
-    2. Runs privileged helper (services, system certs, opensc.conf, policies)
-    3. Configures user-space browsers (Firefox profiles, Chrome ~/.pki/nssdb, user p11-kit)
-    4. Validates final configuration
-    """
+    """Automate end-to-end DoD CAC setup with strict postcondition verification."""
     plat = detect_platform()
-    result = {
+    result: Dict[str, Any] = {
         "success": False,
         "platform": plat.name,
         "step": "",
@@ -200,7 +224,6 @@ def run_full_setup(
     _progress(0.10, "Detecting middleware modules...")
     module_path = find_opensc_module()
     if not module_path:
-        # Fallback path based on family
         module_path = (
             "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so"
             if plat.is_debian_derivative
@@ -214,10 +237,11 @@ def run_full_setup(
     certs_dir = os.path.join(SCRIPT_DIR, "certificates")
     helper_args = [
         "--all",
-        "--family", plat.family,
-        "--module", module_path,
+        "--family",
+        plat.family,
+        "--module",
+        module_path,
     ]
-    # Prefer protected system bundle if installed; otherwise pass verified local certs_dir
     if not (os.path.isdir(system_certs_dir) and os.path.isdir(os.path.join(system_certs_dir, "all_cas"))):
         if os.path.isdir(certs_dir):
             helper_args.extend(["--certs-dir", certs_dir])
@@ -232,7 +256,6 @@ def run_full_setup(
     browser_res = configure_all_browsers(log_fn=_log)
     result["details"]["browsers"] = browser_res
 
-    # Programmatic warm ATR reset to synchronize smart card post-daemon restart
     if shutil.which("opensc-tool"):
         try:
             subprocess.run(["opensc-tool", "--reset", "warm"], capture_output=True, timeout=4)
@@ -240,8 +263,8 @@ def run_full_setup(
             pass
 
     # Step 4: Rigorous Postcondition Verification
-    _progress(0.85, "Verifying hardware and browser integration postconditions...")
-    card_stat = scan_smartcard()
+    _progress(0.85, "Verifying system trust and browser postconditions...")
+    card_stat = scan_smartcard(force_refresh=True)
     b_stat = check_browsers_status()
 
     result["details"]["card_status"] = card_stat
@@ -249,23 +272,40 @@ def run_full_setup(
 
     from core.certificates import is_system_trust_installed
     trust_verified = is_system_trust_installed(plat)
-    browser_errors = browser_res.get("errors", [])
+    browser_errors = list(browser_res.get("errors", []))
 
-    if browser_errors:
+    ff_ready = b_stat.firefox_policy_active or b_stat.firefox_module_loaded
+    chrome_ready = b_stat.chrome_module_loaded
+
+    if not ff_ready:
+        browser_errors.append("Firefox policy and PKCS#11 security device could not be verified.")
+    if not chrome_ready:
+        browser_errors.append("Chrome/Chromium NSS database (~/.pki/nssdb) PKCS#11 module could not be verified.")
+
+    if not trust_verified:
+        result["success"] = False
+        result["message"] = "DoD Root CA trust could not be verified in the operating system root store."
+        _log(f"[ERROR] {result['message']}")
+    elif browser_errors:
         result["success"] = False
         result["partial"] = True
         result["message"] = f"Setup completed with warnings/errors: {'; '.join(browser_errors)}"
         _progress(0.95, "Setup completed with warnings.")
         _log(f"[WARNING] {result['message']}")
-    elif not trust_verified:
-        result["success"] = False
-        result["message"] = "DoD Root CA trust could not be verified in the operating system root store."
-        _log(f"[ERROR] {result['message']}")
     else:
         result["success"] = True
-        result["message"] = "All system services, DoD root trust anchors, and browser security devices verified successfully!"
-        _progress(1.0, "Setup Complete! CAC is ready for browser authentication.")
-        _log("[SUCCESS] Full DoD CAC configuration verified and complete!")
+        if card_stat.card_present:
+            result["message"] = (
+                "All 4 DoD Root CAs, middleware services, and browser security devices verified; "
+                "inserted CAC is ready for authentication."
+            )
+        else:
+            result["message"] = (
+                "All 4 DoD Root CAs, middleware services, and browser security devices verified. "
+                "Insert a DoD CAC into your reader to authenticate."
+            )
+        _progress(1.0, "Setup Complete! System trust and browser modules verified.")
+        _log(f"[SUCCESS] {result['message']}")
 
     return result
 
@@ -287,7 +327,6 @@ def install_desktop_integration(
     launcher_path = os.path.join(bin_dir, "sentinel-cac-manager")
     desktop_file = os.path.join(app_dir, "sentinel_cac_manager.desktop")
 
-    # Step 1: Strict upfront validation of all supplied paths BEFORE creating or changing files (CWE-74)
     for p_name, p_val in (
         ("project_dir", project_dir),
         ("home", home),
@@ -319,7 +358,6 @@ def install_desktop_integration(
         os.makedirs(app_dir, exist_ok=True)
         os.makedirs(icon_dir, exist_ok=True)
 
-        # 1. Icon
         for candidate_icon in ["sentinel_cac_manager.png", "sentinel_icon.png", "sentinel_icon_v2.png"]:
             icon_src = os.path.join(project_dir, candidate_icon)
             if os.path.isfile(icon_src):
@@ -332,13 +370,10 @@ def install_desktop_integration(
         if not os.path.isfile(icon_path):
             icon_path = os.path.join(project_dir, "sentinel_cac_manager.png")
 
-        # 2. Desktop entry (staged and written atomically)
         def escape_desktop_value(val: str) -> str:
-            """Escape backslashes for standard desktop entry line-oriented string fields (CWE-74)."""
             return val.replace("\\", "\\\\")
 
         def escape_desktop_exec_arg(val: str) -> str:
-            """Escape an argument according to FreeDesktop Desktop Entry Exec key rules (CWE-88)."""
             escaped = val.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$")
             return f'"{escaped}"'
 
@@ -360,8 +395,7 @@ Keywords=CAC;PIV;DoD;SmartCard;Military;Security;Authentication;
 StartupNotify=true
 StartupWMClass=com.codefxr.sentinel_cac_manager
 """
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode="w", dir=app_dir, delete=False) as f_dt:
+        with tempfile.NamedTemporaryFile(mode="w", dir=app_dir, delete=False, encoding="utf-8") as f_dt:
             desktop_tmp = f_dt.name
             f_dt.write(desktop_content)
         os.chmod(desktop_tmp, 0o644)
@@ -374,23 +408,19 @@ StartupWMClass=com.codefxr.sentinel_cac_manager
             except Exception:
                 pass
 
-        if shutil.which("update-desktop-database"):
+        if shutil.which("update-desktop-database") and home_dir is None:
             subprocess.run(["update-desktop-database", app_dir], capture_output=True)
 
-        # 3. Executable launcher in ~/.local/bin/sentinel-cac-manager (staged atomically)
-        import shlex
         quoted_script = shlex.quote(script_target)
         launcher_script = f"""#!/usr/bin/env bash
 exec python3 {quoted_script} "$@"
 """
-        with tempfile.NamedTemporaryFile(mode="w", dir=bin_dir, delete=False) as f_ln:
+        with tempfile.NamedTemporaryFile(mode="w", dir=bin_dir, delete=False, encoding="utf-8") as f_ln:
             launcher_tmp = f_ln.name
             f_ln.write(launcher_script)
         os.chmod(launcher_tmp, 0o755)
         os.replace(launcher_tmp, launcher_path)
 
-        # Symlink for sentinel: only create or update if it's ours or doesn't exist
-        # Prevent clobbering third-party commands (e.g. HashiCorp Sentinel)
         alias_path = os.path.join(bin_dir, "sentinel")
         if os.path.islink(alias_path):
             try:
@@ -406,7 +436,6 @@ exec python3 {quoted_script} "$@"
             except OSError:
                 pass
 
-        # Remove legacy dev symlinks if present
         for old_alias in ["sentinel-v2", "sentinel2"]:
             old_p = os.path.join(bin_dir, old_alias)
             if os.path.islink(old_p) or os.path.isfile(old_p):
@@ -418,19 +447,19 @@ exec python3 {quoted_script} "$@"
         if log_fn:
             log_fn(f"Created command launcher at {launcher_path}")
 
-        # 4. Optional Desktop folder shortcut
         desktop_dir = os.path.join(home, "Desktop")
         if os.path.isdir(desktop_dir):
             try:
                 user_desktop_file = os.path.join(desktop_dir, "sentinel_cac_manager.desktop")
-                user_desktop_tmp = f"{user_desktop_file}.tmp.{os.getpid()}"
-                shutil.copy2(desktop_file, user_desktop_tmp)
+                with tempfile.NamedTemporaryFile(mode="w", dir=desktop_dir, delete=False, encoding="utf-8") as f_ud:
+                    user_desktop_tmp = f_ud.name
+                    f_ud.write(desktop_content)
                 os.chmod(user_desktop_tmp, 0o755)
                 os.replace(user_desktop_tmp, user_desktop_file)
                 legacy_user_desktop = os.path.join(desktop_dir, "sentinel_v2.desktop")
                 if os.path.isfile(legacy_user_desktop):
                     os.remove(legacy_user_desktop)
-                if shutil.which("gio"):
+                if shutil.which("gio") and home_dir is None:
                     subprocess.run(
                         ["gio", "set", user_desktop_file, "metadata::trusted", "true"],
                         capture_output=True,
@@ -453,12 +482,18 @@ def uninstall_desktop_integration(
     home_dir: Optional[str] = None,
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> Tuple[bool, str]:
-    """Remove user-level launchers, shortcuts, icons, and modules."""
+    """Remove user-level launchers, shortcuts, icons, browser modules/prefs, and user services."""
     home = home_dir or os.path.expanduser("~")
     bin_dir = os.path.join(home, ".local", "bin")
     app_dir = os.path.join(home, ".local", "share", "applications")
     icon_dir = os.path.join(home, ".local", "share", "icons", "hicolor", "256x256", "apps")
     desktop_dir = os.path.join(home, "Desktop")
+
+    # Revert user-space browser configurations (NSS module, imported CAs, user.js, pkcs11.txt)
+    try:
+        uninstall_all_browsers(home_dir=home, log_fn=log_fn)
+    except Exception as e:
+        logger.debug(f"Browser cleanup note: {e}")
 
     files_to_remove = [
         os.path.join(app_dir, "sentinel_cac_manager.desktop"),
@@ -469,7 +504,9 @@ def uninstall_desktop_integration(
         os.path.join(bin_dir, "sentinel2"),
         os.path.join(desktop_dir, "sentinel_cac_manager.desktop"),
         os.path.join(desktop_dir, "sentinel_v2.desktop"),
+        os.path.join(home, ".config", "pkcs11", "modules", "sentinel-opensc.module"),
         os.path.join(home, ".config", "pkcs11", "modules", "opensc.module"),
+        os.path.join(home, ".config", "sentinel", "config.json"),
     ]
 
     sentinel_bin = os.path.join(bin_dir, "sentinel")
@@ -490,7 +527,7 @@ def uninstall_desktop_integration(
             except OSError:
                 pass
 
-    if shutil.which("update-desktop-database") and os.path.isdir(app_dir):
+    if shutil.which("update-desktop-database") and os.path.isdir(app_dir) and home_dir is None:
         subprocess.run(["update-desktop-database", app_dir], capture_output=True)
 
     try:
@@ -499,14 +536,14 @@ def uninstall_desktop_integration(
     except Exception as e:
         logger.debug(f"Could not cleanly uninstall user service: {e}")
 
-    msg = f"Removed {removed_count} user desktop and launcher items."
+    msg = f"Removed {removed_count} user desktop, browser, and launcher items."
     if log_fn:
         log_fn(msg)
     return True, msg
 
 
 def run_full_uninstall(log_callback: Optional[Callable[[str], None]] = None) -> bool:
-    """Run full uninstallation: revert system trust, browser policies, and user launchers."""
+    """Run full uninstallation: revert user browser/desktop config first, then system trust and policies."""
     def _log(msg: str):
         logger.info(msg)
         if log_callback:
@@ -515,10 +552,10 @@ def run_full_uninstall(log_callback: Optional[Callable[[str], None]] = None) -> 
     _log("Starting Sentinel CAC Manager full uninstallation and rollback...")
     plat = detect_platform()
 
-    # Step 1: Revert user desktop integration
+    # Step 1: Revert user desktop and browser integration (NSS DB, Firefox prefs, launchers)
     uninstall_desktop_integration(log_fn=_log)
 
-    # Step 2: Elevated uninstallation (system CAs, policies, OpenSC config)
+    # Step 2: Elevated uninstallation (system CAs, enterprise policies, OpenSC config, helper)
     ok, helper_msg = run_privileged_helper(["--uninstall", "--family", plat.family], log_fn=_log, timeout=60)
     if not ok:
         _log(f"[ERROR] Privileged rollback failed: {helper_msg}")
@@ -528,102 +565,60 @@ def run_full_uninstall(log_callback: Optional[Callable[[str], None]] = None) -> 
     return True
 
 
-def check_smartcard_logon_status() -> dict:
-    """Inspect workstation PAM/SSSD smartcard logon and screen locking status."""
-    plat = detect_platform()
-    logon_enabled = False
-    sssd_configured = os.path.isfile("/etc/sssd/conf.d/sentinel-smartcard.conf")
-
-    authselect_bin = shutil.which("authselect")
-    if authselect_bin and plat.family in ("fedora", "rhel", "centos"):
-        try:
-            res = subprocess.run([authselect_bin, "is-feature-enabled", "with-smartcard"], capture_output=True)
-            if res.returncode == 0:
-                logon_enabled = True
-        except Exception:
-            pass
-    elif sssd_configured:
-        logon_enabled = True
-
+def check_smartcard_logon_status(home_dir: Optional[str] = None) -> dict:
+    """Inspect workstation screen locking status."""
     from core.agent import is_lock_on_removal_enabled
-    lock_removal_enabled = is_lock_on_removal_enabled()
+    lock_removal_enabled = is_lock_on_removal_enabled(home_dir=home_dir)
 
     return {
-        "logon_enabled": logon_enabled,
+        "logon_enabled": False,
         "lock_removal_enabled": lock_removal_enabled,
-        "sssd_configured": sssd_configured,
-        "platform_supported": plat.family in ("fedora", "rhel", "centos", "debian"),
+        "sssd_configured": False,
+        "platform_supported": False,
     }
-
-
-def enable_workstation_logon(
-    target_user: Optional[str] = None,
-    edipi: Optional[str] = None,
-    log_fn: Optional[Callable[[str], None]] = None,
-) -> Tuple[bool, str]:
-    """Configure OS smart card logon via elevated privileged helper."""
-    import getpass
-    user = target_user or getpass.getuser()
-    plat = detect_platform()
-    args = ["--logon", "--family", plat.family, "--target-user", user]
-    if edipi:
-        args.extend(["--edipi", edipi])
-
-    ok, msg = run_privileged_helper(args, log_fn=log_fn, timeout=30)
-    return ok, msg
-
-
-def disable_workstation_logon(
-    log_fn: Optional[Callable[[str], None]] = None,
-) -> Tuple[bool, str]:
-    """Disable OS smart card logon and restore PAM stack."""
-    plat = detect_platform()
-    ok, msg = run_privileged_helper(["--disable-logon", "--family", plat.family], log_fn=log_fn, timeout=30)
-    return ok, msg
 
 
 def set_lock_on_removal(
     enabled: bool,
     log_fn: Optional[Callable[[str], None]] = None,
+    home_dir: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """Configure screen lock on smart card removal across desktop environments."""
     def _log(msg: str):
         if log_fn:
             log_fn(msg)
 
-    # 1. Update Sentinel agent user config
+    base_home = Path(home_dir) if home_dir else Path.home()
     try:
-        conf_dir = Path.home() / ".config" / "sentinel"
+        conf_dir = base_home / ".config" / "sentinel"
         conf_dir.mkdir(parents=True, exist_ok=True)
         conf_file = conf_dir / "config.json"
         data = {}
         if conf_file.is_file():
-            import json
             try:
                 data = json.loads(conf_file.read_text(encoding="utf-8"))
             except Exception:
                 pass
         data["lock_on_removal"] = enabled
-        import json
         conf_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
         _log(f"Updated Sentinel config lock_on_removal={enabled}")
     except Exception as e:
         _log(f"Warning: Could not write Sentinel user config: {e}")
 
-    # 2. Update GNOME settings if available
-    gsettings = shutil.which("gsettings")
-    if gsettings:
-        action = "lock-screen" if enabled else "none"
-        try:
-            subprocess.run(
-                [gsettings, "set", "org.gnome.settings-daemon.peripherals.smartcard", "removal-action", action],
-                capture_output=True,
-                timeout=2,
-            )
-            _log(f"Configured GNOME smartcard removal-action to '{action}'")
-        except Exception as e:
-            _log(f"Note: Could not set gsettings removal-action: {e}")
+    # Only invoke host gsettings when operating on the real user session (never in isolated home_dir tests)
+    if home_dir is None:
+        gsettings = shutil.which("gsettings")
+        if gsettings:
+            action = "lock-screen" if enabled else "none"
+            try:
+                subprocess.run(
+                    [gsettings, "set", "org.gnome.settings-daemon.peripherals.smartcard", "removal-action", action],
+                    capture_output=True,
+                    timeout=2,
+                )
+                _log(f"Configured GNOME smartcard removal-action to '{action}'")
+            except Exception as e:
+                _log(f"Note: Could not set gsettings removal-action: {e}")
 
     status_str = "enabled" if enabled else "disabled"
     return True, f"Screen lock on smart card removal {status_str}."
-

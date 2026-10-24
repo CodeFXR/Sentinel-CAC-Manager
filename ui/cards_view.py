@@ -84,7 +84,14 @@ class CardsView(Gtk.Box):
             pin_badge = Gtk.Label(label="LOCKED")
             pin_badge.add_css_class("badge-danger")
         elif card_stat.pin_retries_remaining is not None:
-            pin_row.set_subtitle(f"{card_stat.pin_retries_remaining} verification attempts remaining before card lockout.")
+            if card_stat.pin_retries_remaining == 1:
+                pin_row.set_subtitle(
+                    "1 verification attempt remaining. Automated PIN change is disabled to prevent card lockout."
+                )
+            else:
+                pin_row.set_subtitle(
+                    f"{card_stat.pin_retries_remaining} verification attempts remaining before card lockout."
+                )
             pin_badge = Gtk.Label(label=f"{card_stat.pin_retries_remaining} Retries")
             if card_stat.pin_retries_remaining >= 3:
                 pin_badge.add_css_class("badge-success")
@@ -103,7 +110,7 @@ class CardsView(Gtk.Box):
         btn_change_pin = Gtk.Button(label="Change PIN...")
         btn_change_pin.set_valign(Gtk.Align.CENTER)
         btn_change_pin.add_css_class("suggested-action")
-        if card_stat.pin_locked:
+        if card_stat.pin_locked or card_stat.pin_retries_remaining == 1:
             btn_change_pin.set_sensitive(False)
         btn_change_pin.connect("clicked", lambda _: self._show_change_pin_dialog(card_stat))
         pin_row.add_suffix(btn_change_pin)
@@ -293,6 +300,10 @@ class CardsView(Gtk.Box):
             spinner.set_visible(True)
             spinner.start()
 
+            current_pin_row.set_text("")
+            new_pin_row.set_text("")
+            confirm_pin_row.set_text("")
+
             def worker():
                 from core.smartcard import change_card_pin
                 ok, retries, msg = change_card_pin(curr_pin, new_pin, card_stat.reader_name)
@@ -303,20 +314,17 @@ class CardsView(Gtk.Box):
                     if ok:
                         dialog.close()
                         self.main_window.show_toast("PIV PIN updated successfully.")
-                        self.main_window.refresh_all_status()
+                        self.main_window.refresh_all_status(force=True)
                     else:
                         submit_btn.set_sensitive(True)
                         cancel_btn.set_sensitive(True)
                         current_pin_row.set_sensitive(True)
                         new_pin_row.set_sensitive(True)
                         confirm_pin_row.set_sensitive(True)
-                        current_pin_row.set_text("")
-                        new_pin_row.set_text("")
-                        confirm_pin_row.set_text("")
                         status_label.set_text(f"PIN change failed: {msg}")
                         status_label.add_css_class("error-label")
                         status_label.set_visible(True)
-                        self.main_window.refresh_all_status()
+                        self.main_window.refresh_all_status(force=True)
                     return False
 
                 GLib.idle_add(on_done)

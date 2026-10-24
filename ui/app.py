@@ -112,8 +112,13 @@ class MainWindow(Adw.ApplicationWindow):
         # Right: Action buttons
         refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic")
         refresh_btn.set_tooltip_text("Refresh Smart Card Status")
-        refresh_btn.connect("clicked", lambda b: self.refresh_all_status())
+        refresh_btn.connect("clicked", lambda b: self.refresh_all_status(force=True))
         header.pack_end(refresh_btn)
+
+        update_btn = Gtk.Button(icon_name="software-update-available-symbolic")
+        update_btn.set_tooltip_text("Check for Application Updates")
+        update_btn.connect("clicked", self.on_header_check_updates)
+        header.pack_end(update_btn)
 
         test_btn = Gtk.Button(icon_name="web-browser-symbolic")
         test_btn.set_tooltip_text("Test Browser Authentication (MyPay)")
@@ -171,14 +176,18 @@ class MainWindow(Adw.ApplicationWindow):
     def append_log(self, text: str):
         self.diagnostics_view.append_log(text)
 
-    def refresh_all_status(self):
+    def on_header_check_updates(self, _btn):
+        self.view_stack.set_visible_child_name("system")
+        self.system_view.on_check_updates(self.system_view.check_update_btn)
+
+    def refresh_all_status(self, force: bool = False):
         """Asynchronously refresh status from hardware and system."""
         if self._is_polling:
             return
         self._is_polling = True
 
         def _worker():
-            c_stat = scan_smartcard()
+            c_stat = scan_smartcard(force_refresh=force)
             b_stat = check_browsers_status()
             certs_installed = is_system_trust_installed(self.platform)
             GLib.idle_add(self._apply_status_update, c_stat, b_stat, certs_installed)

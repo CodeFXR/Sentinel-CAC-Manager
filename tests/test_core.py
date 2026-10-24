@@ -22,9 +22,9 @@ from cli import _clean_term
 
 class TestRustBridge(unittest.TestCase):
     def test_rust_availability(self):
-        # On systems where Rust is compiled, verify version 2.0.0
+        # On systems where Rust is compiled, verify version 2.0.1
         if is_rust_available():
-            self.assertEqual(get_rust_version(), "2.0.0")
+            self.assertEqual(get_rust_version(), "2.0.1")
         else:
             self.assertIsNone(get_rust_version())
 
@@ -356,7 +356,7 @@ class TestSubprocessTimeoutHandling(unittest.TestCase):
 class TestVersionConsistency(unittest.TestCase):
     def test_version_matches(self):
         import core
-        self.assertEqual(core.__version__, "2.0.0")
+        self.assertEqual(core.__version__, "2.0.1")
 
 
 class TestPinManagement(unittest.TestCase):
@@ -381,6 +381,16 @@ class TestPinManagement(unittest.TestCase):
         ok, retries, msg = change_pin_rust("123456", "abcdef")
         self.assertFalse(ok)
         self.assertIn("6 to 8 numeric digits", msg)
+
+    def test_change_card_pin_final_retry_guard(self):
+        from unittest.mock import patch
+        from core.smartcard import change_card_pin
+
+        with patch("core.rust_bridge.query_pin_status_rust", return_value=(True, 1, "1 attempt(s) remaining")):
+            ok, retries, msg = change_card_pin("123456", "654321")
+            self.assertFalse(ok)
+            self.assertEqual(retries, 1)
+            self.assertIn("only 1 PIN retry attempt remains", msg)
 
     def test_query_pin_status_types(self):
         from core.rust_bridge import query_pin_status_rust
@@ -427,33 +437,389 @@ class TestAgentDaemon(unittest.TestCase):
                 self.assertFalse(os.path.isfile(service_file))
 
 
-class TestWorkstationLogon(unittest.TestCase):
+class TestWorkstationLogonAndLock(unittest.TestCase):
     def test_check_logon_status_structure(self):
+        import tempfile
         from core.system_fix import check_smartcard_logon_status
-        stat = check_smartcard_logon_status()
-        self.assertIsInstance(stat, dict)
-        self.assertIn("logon_enabled", stat)
-        self.assertIn("lock_removal_enabled", stat)
-        self.assertIn("sssd_configured", stat)
-        self.assertIn("platform_supported", stat)
+        with tempfile.TemporaryDirectory() as tmp_home:
+            stat = check_smartcard_logon_status(home_dir=tmp_home)
+            self.assertIsInstance(stat, dict)
+            self.assertIn("logon_enabled", stat)
+            self.assertIn("lock_removal_enabled", stat)
+            self.assertIn("sssd_configured", stat)
+            self.assertIn("platform_supported", stat)
 
-    def test_set_lock_on_removal_toggle(self):
+    def test_set_lock_on_removal_toggle_isolated(self):
+        import tempfile
         from core.system_fix import set_lock_on_removal
-        ok1, msg1 = set_lock_on_removal(True)
-        self.assertTrue(ok1)
-        self.assertIn("enabled", msg1)
+        with tempfile.TemporaryDirectory() as tmp_home:
+            ok1, msg1 = set_lock_on_removal(True, home_dir=tmp_home)
+            self.assertTrue(ok1)
+            self.assertIn("enabled", msg1)
 
-        ok2, msg2 = set_lock_on_removal(False)
-        self.assertTrue(ok2)
-        self.assertIn("disabled", msg2)
+            ok2, msg2 = set_lock_on_removal(False, home_dir=tmp_home)
+            self.assertTrue(ok2)
+            self.assertIn("disabled", msg2)
 
-    def test_lock_on_removal_check(self):
+    def test_lock_on_removal_check_isolated(self):
+        import tempfile
         from core.agent import is_lock_on_removal_enabled
         from core.system_fix import set_lock_on_removal
-        set_lock_on_removal(True)
-        self.assertTrue(is_lock_on_removal_enabled())
-        set_lock_on_removal(False)
-        self.assertFalse(is_lock_on_removal_enabled())
+        with tempfile.TemporaryDirectory() as tmp_home:
+            set_lock_on_removal(True, home_dir=tmp_home)
+            self.assertTrue(is_lock_on_removal_enabled(home_dir=tmp_home))
+            set_lock_on_removal(False, home_dir=tmp_home)
+            self.assertFalse(is_lock_on_removal_enabled(home_dir=tmp_home))
+
+    def test_archived_future_workstation_logon_hardening(self):
+        import tempfile
+        import os
+        from archive.future_workstation_logon import (
+            validate_logon_inputs,
+            build_sssd_smartcard_config,
+            has_existing_enterprise_sssd_domain,
+        )
+        # Missing or wildcard EDIPI must be rejected
+        ok_empty, _ = validate_logon_inputs("root", "")
+        self.assertFalse(ok_empty)
+        ok_short, _ = validate_logon_inputs("root", "12345")
+        self.assertFalse(ok_short)
+
+        # Valid 10-digit EDIPI and existing local user (root) must succeed
+        ok_valid, _ = validate_logon_inputs("root", "1234567890")
+        self.assertTrue(ok_valid)
+
+        # Generated SSSD config must bind both EDIPI and local username (never wildcard CN=.*)
+        cfg = build_sssd_smartcard_config("root", "1234567890", "/usr/lib64/opensc-pkcs11.so")
+        self.assertIn("1234567890", cfg)
+        self.assertIn("maprule = (uid=root)", cfg)
+        self.assertNotIn("CN=.*\n", cfg)
+
+        # Enterprise SSSD domain conflict detection
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            conf_path = os.path.join(tmp_dir, "sssd.conf")
+            with open(conf_path, "w") as f:
+                f.write("[sssd]\ndomains = corp.example.mil\n[domain/corp.example.mil]\nid_provider = ad\n")
+            self.assertTrue(has_existing_enterprise_sssd_domain(sssd_conf_path=conf_path, conf_d_dir=tmp_dir))
+
+
+class TestV201SecurityAndRollbackHardening(unittest.TestCase):
+    def test_python_fallback_when_rust_disabled(self):
+        from unittest.mock import patch
+        cmd = [
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", "/dev/null",
+            "-nodes", "-subj", "/C=US/O=U.S. Government/OU=DoD/OU=PKI/CN=DOE.JOHN.R.CTR.1234567890",
+            "-days", "30", "-outform", "DER"
+        ]
+        p = subprocess.run(cmd, capture_output=True)
+        self.assertEqual(p.returncode, 0)
+
+        with patch("core.rust_bridge.is_rust_available", return_value=False):
+            cert = parse_card_certificate_rust("0005", "CAC ID", "DoD Web Logon", p.stdout)
+            self.assertIsNotNone(cert)
+            self.assertEqual(cert.holder_name, "John R Doe")
+            self.assertEqual(cert.edipi, "1234567890")
+            self.assertTrue(cert.is_valid)
+
+    def test_future_not_before_status_text(self):
+        from core.smartcard import _parse_x509_text
+        future_out = (
+            "subject=C = US, O = U.S. Government, OU = DoD, CN = DOE.JANE.1234567890\n"
+            "issuer=C = US, O = U.S. Government, OU = DoD, CN = DOD ID CA-81\n"
+            "notBefore=Jan  1 00:00:00 2099 GMT\n"
+            "notAfter=Jan  1 00:00:00 2100 GMT\n"
+            "serial=01020304\n"
+        )
+        cert = _parse_x509_text(future_out, "0005", "CAC ID", "DoD Web Logon")
+        self.assertFalse(cert.is_valid)
+        self.assertIn("Not Yet Valid", cert.status_text)
+
+    def test_non_destructive_debian_ca_cleanup(self):
+        import tempfile
+        import os
+        from core.privileged_helper import _clean_sentinel_owned_certs_in_dir
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # 1. Sentinel-owned root cert
+            sentinel_crt = os.path.join(tmp_dir, "DoD_Root_CA_3.crt")
+            with open(sentinel_crt, "w") as f:
+                f.write("sentinel cert")
+            # 2. Unrelated enterprise/admin cert in same directory
+            custom_crt = os.path.join(tmp_dir, "Internal_Agency_Root_CA.crt")
+            with open(custom_crt, "w") as f:
+                f.write("custom enterprise cert")
+
+            removed = _clean_sentinel_owned_certs_in_dir(tmp_dir)
+            self.assertEqual(removed, 1)
+            self.assertFalse(os.path.exists(sentinel_crt))
+            self.assertTrue(os.path.exists(custom_crt))
+
+    def test_non_destructive_firefox_policy_revert(self):
+        import tempfile
+        import json
+        import os
+        from core.privileged_helper import revert_firefox_policy_file
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            policy_path = os.path.join(tmp_dir, "policies.json")
+            # Case 1: Mixed enterprise policy + Sentinel keys -> preserve enterprise keys
+            mixed = {
+                "policies": {
+                    "DisableTelemetry": True,
+                    "Certificates": {
+                        "ImportEnterpriseRoots": True,
+                        "Install": ["/usr/share/sentinel/certificates/DoD_Full_Chain.pem"],
+                    },
+                    "SecurityDevices": {
+                        "DoD CAC": "/usr/lib64/opensc-pkcs11.so",
+                        "YubiKey PKCS11": "/usr/lib64/libykcs11.so",
+                    },
+                }
+            }
+            with open(policy_path, "w") as f:
+                json.dump(mixed, f)
+
+            revert_firefox_policy_file(policy_path)
+            self.assertTrue(os.path.isfile(policy_path))
+            with open(policy_path, "r") as f:
+                updated = json.load(f)
+            self.assertTrue(updated["policies"].get("DisableTelemetry"))
+            self.assertNotIn("DoD CAC", updated["policies"].get("SecurityDevices", {}))
+            self.assertIn("YubiKey PKCS11", updated["policies"].get("SecurityDevices", {}))
+
+            # Case 2: Only Sentinel keys -> file removed cleanly
+            sentinel_only = {
+                "policies": {
+                    "Certificates": {
+                        "ImportEnterpriseRoots": True,
+                        "Install": ["/usr/share/sentinel/certificates/DoD_Full_Chain.pem"],
+                    },
+                    "SecurityDevices": {
+                        "DoD CAC": "/usr/lib64/opensc-pkcs11.so",
+                    },
+                }
+            }
+            with open(policy_path, "w") as f:
+                json.dump(sentinel_only, f)
+
+            revert_firefox_policy_file(policy_path)
+            self.assertFalse(os.path.exists(policy_path))
+
+    def test_comment_aware_opensc_config_check(self):
+        from core.privileged_helper import is_opensc_config_optimized
+        commented = "app default {\n    # card_drivers = CAC, piv-II;\n}\n"
+        self.assertFalse(is_opensc_config_optimized(commented))
+
+        active = "app default {\n    card_drivers = cac, piv-II;\n}\n"
+        self.assertTrue(is_opensc_config_optimized(active))
+
+    def test_validate_pkcs11_module_path(self):
+        from core.privileged_helper import validate_pkcs11_module_path
+        self.assertFalse(validate_pkcs11_module_path("relative/opensc-pkcs11.so"))
+        self.assertFalse(validate_pkcs11_module_path("/usr/lib64/opensc-pkcs11.so\nmalicious: true"))
+        self.assertFalse(validate_pkcs11_module_path("/nonexistent/path/opensc-pkcs11.so"))
+
+    def test_ocsp_cryptographic_verification(self):
+        from datetime import datetime, timedelta, timezone
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509 import ocsp
+        from cryptography.x509.oid import NameOID
+        from core.smartcard import _verify_ocsp_response_cryptographically
+
+        now = datetime.now(timezone.utc)
+        ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test DoD ID CA")])
+        ca_cert = (
+            x509.CertificateBuilder()
+            .subject_name(ca_name)
+            .issuer_name(ca_name)
+            .public_key(ca_key.public_key())
+            .serial_number(1)
+            .not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=30))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "DOE.JOHN.1234567890")])
+        leaf_cert = (
+            x509.CertificateBuilder()
+            .subject_name(leaf_name)
+            .issuer_name(ca_name)
+            .public_key(leaf_key.public_key())
+            .serial_number(42)
+            .not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=30))
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        # 1. Valid CA-signed OCSP response -> must pass cryptographic verification
+        valid_resp = (
+            ocsp.OCSPResponseBuilder()
+            .add_response(
+                cert=leaf_cert,
+                issuer=ca_cert,
+                algorithm=hashes.SHA256(),
+                cert_status=ocsp.OCSPCertStatus.GOOD,
+                this_update=now - timedelta(minutes=1),
+                next_update=now + timedelta(hours=1),
+                revocation_time=None,
+                revocation_reason=None,
+            )
+            .responder_id(ocsp.OCSPResponderEncoding.HASH, ca_cert)
+            .sign(ca_key, hashes.SHA256())
+        )
+        single = next(iter(valid_resp.responses))
+        ok, msg = _verify_ocsp_response_cryptographically(valid_resp, single, leaf_cert, ca_cert)
+        self.assertTrue(ok, msg)
+
+        # 2. Forged OCSP response signed by an untrusted key -> must be rejected
+        rogue_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        rogue_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Rogue OCSP Signer")])
+        rogue_cert = (
+            x509.CertificateBuilder()
+            .subject_name(rogue_name)
+            .issuer_name(rogue_name)
+            .public_key(rogue_key.public_key())
+            .serial_number(999)
+            .not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=30))
+            .sign(rogue_key, hashes.SHA256())
+        )
+        rogue_resp = (
+            ocsp.OCSPResponseBuilder()
+            .add_response(
+                cert=leaf_cert,
+                issuer=ca_cert,
+                algorithm=hashes.SHA256(),
+                cert_status=ocsp.OCSPCertStatus.GOOD,
+                this_update=now - timedelta(minutes=1),
+                next_update=now + timedelta(hours=1),
+                revocation_time=None,
+                revocation_reason=None,
+            )
+            .responder_id(ocsp.OCSPResponderEncoding.HASH, rogue_cert)
+            .sign(rogue_key, hashes.SHA256())
+        )
+        rogue_single = next(iter(rogue_resp.responses))
+        ok_rogue, _ = _verify_ocsp_response_cryptographically(rogue_resp, rogue_single, leaf_cert, ca_cert)
+        self.assertFalse(ok_rogue)
+
+        # 3. Replay attack with expired nextUpdate -> must be rejected
+        expired_resp = (
+            ocsp.OCSPResponseBuilder()
+            .add_response(
+                cert=leaf_cert,
+                issuer=ca_cert,
+                algorithm=hashes.SHA256(),
+                cert_status=ocsp.OCSPCertStatus.GOOD,
+                this_update=now - timedelta(days=2),
+                next_update=now - timedelta(days=1),
+                revocation_time=None,
+                revocation_reason=None,
+            )
+            .responder_id(ocsp.OCSPResponderEncoding.HASH, ca_cert)
+            .sign(ca_key, hashes.SHA256())
+        )
+        expired_single = next(iter(expired_resp.responses))
+        ok_exp, msg_exp = _verify_ocsp_response_cryptographically(expired_resp, expired_single, leaf_cert, ca_cert)
+        self.assertFalse(ok_exp)
+        self.assertIn("expired", msg_exp)
+        _ = serialization.Encoding.DER
+
+    def test_updater_semver_and_sha256_verification(self):
+        import hashlib
+        import io
+        import tarfile
+        import tempfile
+        from core.updater import (
+            parse_semver,
+            is_newer_version,
+            verify_and_stage_archive,
+            UpdateInfo,
+            perform_update,
+        )
+
+        self.assertEqual(parse_semver("v2.0.1"), (2, 0, 1))
+        self.assertEqual(parse_semver("2.1.0"), (2, 1, 0))
+        self.assertIsNone(parse_semver("v2.0.1; rm -rf /"))
+        self.assertTrue(is_newer_version("2.0.1", "2.0.2"))
+        self.assertFalse(is_newer_version("2.0.1", "2.0.1"))
+        self.assertFalse(is_newer_version("2.0.1", "1.9.9"))
+
+        # Build a valid in-memory tar.gz archive
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            payload = b"print('hello sentinel')\n"
+            info = tarfile.TarInfo(name="Sentinel-CAC-Manager/app.py")
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+        archive_bytes = buf.getvalue()
+        valid_sha = hashlib.sha256(archive_bytes).hexdigest()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # 1. Missing SHA-256 must fail closed
+            ok_missing, _ = verify_and_stage_archive(archive_bytes, "", tmp_dir)
+            self.assertFalse(ok_missing)
+
+            # 2. Mismatched SHA-256 must fail closed
+            ok_bad, msg_bad = verify_and_stage_archive(archive_bytes, "0" * 64, tmp_dir)
+            self.assertFalse(ok_bad)
+            self.assertIn("mismatch", msg_bad)
+
+            # 3. Matching SHA-256 extracts cleanly
+            ok_good, _ = verify_and_stage_archive(archive_bytes, valid_sha, tmp_dir)
+            self.assertTrue(ok_good)
+
+            # 4. perform_update refuses unverified archive when git tag isn't used
+            unverified_info = UpdateInfo(
+                current_version="2.0.1",
+                latest_version="2.0.2",
+                tag_name="v2.0.2",
+                update_available=True,
+                html_url="https://github.com/CodeFXR/Sentinel-CAC-Manager/releases/tag/v2.0.2",
+                download_url="https://github.com/CodeFXR/Sentinel-CAC-Manager/releases/download/v2.0.2/Sentinel-CAC-Manager.tar.gz",
+                expected_sha256=None,
+                status_message="Update available",
+            )
+            ok_upd, msg_upd = perform_update(unverified_info, project_dir=tmp_dir)
+            self.assertFalse(ok_upd)
+            self.assertIn("SHA-256", msg_upd)
+
+    def test_updater_tar_slip_and_symlink_rejection(self):
+        import io
+        import os
+        import tarfile
+        import tempfile
+        from core.updater import safe_extract_tarball
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # 1. Path traversal archive (../../evil.py)
+            trav_path = os.path.join(tmp_dir, "traversal.tar.gz")
+            with tarfile.open(trav_path, "w:gz") as tar:
+                data = b"malicious"
+                tinfo = tarfile.TarInfo(name="../../evil.py")
+                tinfo.size = len(data)
+                tar.addfile(tinfo, io.BytesIO(data))
+
+            ok_trav, msg_trav = safe_extract_tarball(trav_path, os.path.join(tmp_dir, "out1"))
+            self.assertFalse(ok_trav)
+            self.assertIn("Security policy", msg_trav)
+
+            # 2. Symlink archive
+            sym_path = os.path.join(tmp_dir, "symlink.tar.gz")
+            with tarfile.open(sym_path, "w:gz") as tar:
+                sinfo = tarfile.TarInfo(name="Sentinel-CAC-Manager/evil_link")
+                sinfo.type = tarfile.SYMTYPE
+                sinfo.linkname = "/etc/shadow"
+                tar.addfile(sinfo)
+
+            ok_sym, msg_sym = safe_extract_tarball(sym_path, os.path.join(tmp_dir, "out2"))
+            self.assertFalse(ok_sym)
+            self.assertIn("Security policy", msg_sym)
 
 
 if __name__ == "__main__":

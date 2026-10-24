@@ -64,9 +64,7 @@ def cmd_status():
 
     from core.system_fix import check_smartcard_logon_status
     logon_info = check_smartcard_logon_status()
-    logon_str = "[CONFIGURED]" if logon_info["logon_enabled"] else "[NOT CONFIGURED]"
     lock_str = "[ACTIVE]" if logon_info["lock_removal_enabled"] else "[INACTIVE]"
-    print(f"  Workstation Logon:     {logon_str} (Password Fallback Retained)")
     print(f"  Lock on Removal:       {lock_str}")
 
     print("-" * 65)
@@ -158,9 +156,10 @@ def cmd_pin_status() -> int:
 
 def cmd_change_pin() -> bool:
     import getpass
+    from core.rust_bridge import PinBuffer
     from core.smartcard import scan_smartcard, change_card_pin
 
-    card_stat = scan_smartcard()
+    card_stat = scan_smartcard(force_refresh=True)
     if not card_stat.card_present:
         print("[-] No smart card detected in reader.")
         return False
@@ -169,18 +168,29 @@ def cmd_change_pin() -> bool:
         print("[-] PIV PIN is LOCKED. Cardholder must visit a RAPIDS/DEERS facility to unblock.")
         return False
 
+    if card_stat.pin_retries_remaining == 1:
+        print(
+            "[-] Refusing automated PIN change: only 1 PIN retry attempt remains.\n"
+            "    Authenticate once or use a PUK-capable tool to prevent card lockout."
+        )
+        return False
+
     if card_stat.pin_retries_remaining is not None:
         print(f"[*] Card detected with {card_stat.pin_retries_remaining} verification retries remaining.")
 
+    curr_buf = None
+    new_buf = None
     try:
         curr_pin = getpass.getpass("Enter current PIV PIN: ").strip()
-        if not curr_pin:
-            print("[-] Error: Current PIN cannot be empty.")
+        curr_buf = PinBuffer(curr_pin)
+        if not curr_pin or not curr_buf.is_valid_pin_format():
+            print("[-] Error: Current PIN must be 6 to 8 numeric digits.")
             return False
 
         new_pin = getpass.getpass("Enter new PIV PIN (6-8 digits): ").strip()
-        if not (6 <= len(new_pin) <= 8 and new_pin.isdigit()):
-            print("[-] Error: PIV PIN must be 6 to 8 numeric digits.")
+        new_buf = PinBuffer(new_pin)
+        if not new_buf.is_valid_pin_format():
+            print("[-] Error: New PIV PIN must be 6 to 8 numeric digits.")
             return False
 
         if curr_pin == new_pin:
@@ -191,18 +201,23 @@ def cmd_change_pin() -> bool:
         if new_pin != confirm_pin:
             print("[-] Error: Confirmation PIN does not match.")
             return False
+
+        print("[*] Transmitting CHANGE REFERENCE DATA APDU to smart card...")
+        ok, _retries, msg = change_card_pin(curr_pin, new_pin, card_stat.reader_name)
+        if ok:
+            print(f"[+] SUCCESS: {msg}")
+            return True
+        else:
+            print(f"[-] FAILED: {msg}")
+            return False
     except (KeyboardInterrupt, EOFError):
         print("\nAborted.")
         return False
-
-    print("[*] Transmitting CHANGE REFERENCE DATA APDU to smart card...")
-    ok, retries, msg = change_card_pin(curr_pin, new_pin, card_stat.reader_name)
-    if ok:
-        print(f"[+] SUCCESS: {msg}")
-        return True
-    else:
-        print(f"[-] FAILED: {msg}")
-        return False
+    finally:
+        if curr_buf is not None:
+            curr_buf.scrub()
+        if new_buf is not None:
+            new_buf.scrub()
 
 
 def cmd_agent():
@@ -218,38 +233,6 @@ def cmd_install_agent() -> bool:
     ok, msg = install_systemd_user_service(log_fn=print)
     if ok:
         print(f"[+] SUCCESS: {msg}")
-    else:
-        print(f"[-] FAILED: {msg}")
-    return ok
-
-
-def cmd_setup_logon(target_user: Optional[str] = None) -> bool:
-    from core.smartcard import scan_smartcard
-    from core.system_fix import enable_workstation_logon
-
-    card_stat = scan_smartcard()
-    edipi = None
-    if card_stat.card_present and card_stat.primary_certificate:
-        edipi = card_stat.primary_certificate.edipi
-        holder = card_stat.primary_certificate.holder_name or "Cardholder"
-        print(f"[*] Detected inserted CAC for {holder} (EDIPI: {edipi})")
-
-    print("[*] Configuring PAM / SSSD smart card workstation logon...")
-    ok, msg = enable_workstation_logon(target_user=target_user, edipi=edipi, log_fn=print)
-    if ok:
-        print("[+] SUCCESS: Workstation smart card logon configured.")
-        print("[+] Password fallback remains enabled if card is removed.")
-    else:
-        print(f"[-] FAILED: {msg}")
-    return ok
-
-
-def cmd_disable_logon() -> bool:
-    from core.system_fix import disable_workstation_logon
-    print("[*] Reverting workstation smart card logon and restoring PAM profile...")
-    ok, msg = disable_workstation_logon(log_fn=print)
-    if ok:
-        print("[+] SUCCESS: Workstation smart card logon disabled.")
     else:
         print(f"[-] FAILED: {msg}")
     return ok
@@ -275,9 +258,6 @@ def main():
     parser.add_argument("--card-info", action="store_true", help="display details of inserted smart card")
     parser.add_argument("--pin-status", action="store_true", help="display PIV PIN verification retry counter")
     parser.add_argument("--change-pin", action="store_true", help="interactively change PIV smart card PIN")
-    parser.add_argument("--setup-logon", action="store_true", help="configure workstation OS smart card logon (PAM/SSSD)")
-    parser.add_argument("--disable-logon", action="store_true", help="disable workstation OS smart card logon")
-    parser.add_argument("--user", default=None, help="target local username for smart card logon mapping")
     parser.add_argument("--lock-on-removal", action="store_true", help="enable automatic screen lock when card is removed")
     parser.add_argument("--no-lock-on-removal", action="store_true", help="disable screen lock when card is removed")
     parser.add_argument("--agent", action="store_true", help="run background smart card event monitor daemon")
@@ -287,6 +267,8 @@ def main():
     parser.add_argument("--reader-fix", action="store_true", help="apply Broadcom reader hang fix only")
     parser.add_argument("--gui", action="store_true", help="launch graphical interface")
     parser.add_argument("--installer", action="store_true", help="launch graphical setup wizard")
+    parser.add_argument("--check-update", action="store_true", help="check GitHub Releases for a newer version")
+    parser.add_argument("--update", action="store_true", help="update Sentinel to the latest SHA-256 verified release")
     parser.add_argument("--uninstall", action="store_true", help="revert system changes and uninstall Sentinel")
 
     args = parser.parse_args()
@@ -319,6 +301,24 @@ def main():
         from core.system_fix import run_full_uninstall
         ok = run_full_uninstall(log_callback=print)
         sys.exit(0 if ok else 1)
+    elif args.check_update:
+        from core.updater import check_for_updates
+        info = check_for_updates()
+        print(f"Current version: v{info.current_version}")
+        print(f"Latest release:  {info.tag_name}")
+        print(f"Status:          {_clean_term(info.status_message)}")
+        if info.update_available:
+            print(f"Release URL:     {_clean_term(info.html_url)}")
+        sys.exit(0 if not info.error else 1)
+    elif args.update:
+        from core.updater import check_for_updates, perform_update
+        info = check_for_updates()
+        print(f"[*] {_clean_term(info.status_message)}")
+        if not info.update_available:
+            sys.exit(0 if not info.error else 1)
+        ok, msg = perform_update(info, log_fn=print)
+        print(f"[{'+' if ok else '-'}] {_clean_term(msg)}")
+        sys.exit(0 if ok else 1)
     elif args.setup_all:
         ok = cmd_setup()
         sys.exit(0 if ok else 1)
@@ -333,12 +333,6 @@ def main():
         sys.exit(rc)
     elif args.change_pin:
         ok = cmd_change_pin()
-        sys.exit(0 if ok else 1)
-    elif args.setup_logon:
-        ok = cmd_setup_logon(target_user=args.user)
-        sys.exit(0 if ok else 1)
-    elif args.disable_logon:
-        ok = cmd_disable_logon()
         sys.exit(0 if ok else 1)
     elif args.lock_on_removal:
         ok = cmd_lock_on_removal(True)
@@ -358,11 +352,12 @@ def main():
         res = configure_all_browsers(log_fn=print)
         sys.exit(0 if not res.get("errors") else 1)
     elif args.certs:
+        from core.certificates import is_system_trust_installed
         from core.platform_detector import detect_platform
         from core.system_fix import run_privileged_helper
         plat = detect_platform()
         ok, _ = run_privileged_helper(["--certs", "--family", plat.family], log_fn=print)
-        sys.exit(0 if ok else 1)
+        sys.exit(0 if (ok and is_system_trust_installed(plat)) else 1)
     elif args.reader_fix:
         from core.system_fix import run_privileged_helper
         ok, _ = run_privileged_helper(["--reader-fix"], log_fn=print)

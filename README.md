@@ -10,7 +10,7 @@
   <p>
     <img src="https://img.shields.io/badge/Made%20with-GTK4%20%2F%20Libadwaita-00ADD8?style=flat-square" alt="GTK4 Libadwaita" />
     <img src="https://img.shields.io/badge/Language-Python%20%26%20Rust-00ADD8?style=flat-square" alt="Python & Rust" />
-    <img src="https://img.shields.io/badge/Version-v2.0.0-blue?style=flat-square" alt="Version" />
+    <img src="https://img.shields.io/badge/Version-v2.0.1-blue?style=flat-square" alt="Version" />
     <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License" />
   </p>
 
@@ -33,12 +33,12 @@ Configuring a Common Access Card on Linux usually requires orchestrating PC/SC d
 
 ## Why Sentinel CAC Manager?
 
-- **Cryptographic Trust Verification:** Every DoD certificate is verified against an internal SHA-256 manifest before installation.
-- **PKI Trust Anchor Separation:** Installs only the 4 self-signed Root CAs into system root trust, preventing intermediate authority escalation.
+- **Cryptographic Trust Verification:** Every DoD certificate is verified against both a raw-file and canonical ASN.1 DER SHA-256 manifest, CA basic constraints, and validity window before installation.
+- **PKI Trust Anchor Separation:** Installs only the 4 self-signed DoD Root CAs into the OS root trust store, while importing intermediate CAs into browser NSS databases for chain building.
 - **Deep Browser Integration:** Registers PKCS#11 modules via non-destructive Firefox enterprise policies and Chrome NSS databases (`~/.pki/nssdb`).
 - **Hardware Optimization:** Restricts OpenSC driver probing to eliminate 26-second Broadcom 58200 contactless initialization hangs.
-- **Multi-Distribution Support:** First-class support for Debian, Ubuntu, Fedora, RHEL, CentOS, Arch Linux, and openSUSE.
-- **Full Operational Rollback:** Clean `--uninstall` mode reverts all certificates, browser policies, modules, and desktop shortcuts.
+- **Multi-Distribution Support:** Hardware-validated on Fedora and Ubuntu/Debian, with platform abstraction for Arch Linux and openSUSE.
+- **Full Operational Rollback:** Non-destructive `--uninstall` mode reverts Sentinel-installed certificates, browser policy keys, NSS modules, and desktop shortcuts while preserving third-party enterprise settings.
 
 ## Installation
 
@@ -47,7 +47,7 @@ Configuring a Common Access Card on Linux usually requires orchestrating PC/SC d
 | Component | Minimum Version | Notes |
 |---|---|---|
 | Linux Kernel | 5.4+ | USB CCID smart card support enabled |
-| Python | 3.10+ | Standard runtime with PyGObject |
+| Python | 3.10+ | Standard runtime with PyGObject and `cryptography` |
 | PC/SC Daemon | 1.8+ | `pcscd` service and socket |
 | OpenSC | 0.20+ | PKCS#11 middleware provider |
 
@@ -56,15 +56,15 @@ Configuring a Common Access Card on Linux usually requires orchestrating PC/SC d
 Download the pre-packaged offline release archive from [GitHub Releases](https://github.com/CodeFXR/Sentinel-CAC-Manager/releases):
 
 ```bash
-tar -xzf Sentinel-CAC-Manager-v2.0.0.tar.gz
-cd Sentinel-CAC-Manager-v2.0.0
+tar -xzf Sentinel-CAC-Manager-v2.0.1.tar.gz
+cd Sentinel-CAC-Manager-v2.0.1
 ./install
 ```
 
 ### Option 2: Clone from Repository
 
 ```bash
-git clone https://github.com/CodeFXR/Sentinel-CAC-Manager.git
+git clone --branch v2.0.1 https://github.com/CodeFXR/Sentinel-CAC-Manager.git
 cd Sentinel-CAC-Manager
 ./install
 ```
@@ -77,6 +77,8 @@ For server or automated container provisioning without graphical display:
 ```bash
 ./install --cli
 ```
+
+If running `install` as a standalone bootstrap script outside a local checkout, export `SENTINEL_ARCHIVE_SHA256` with the release tarball's SHA-256 digest so the installer can verify archive authenticity before extracting.
 </details>
 
 ## Usage
@@ -93,14 +95,15 @@ Sentinel CAC Manager provides both a Libadwaita desktop application and an unatt
 | `sentinel --card-info` | Display details, EDIPI, holder name, and validity of inserted CAC |
 | `sentinel --pin-status` | Display PIV PIN verification retry counter and lock state |
 | `sentinel --change-pin` | Interactively change PIV smart card PIN with zeroized buffers |
-| `sentinel --setup-logon` | Configure workstation OS smart card logon via SSSD and PAM |
-| `sentinel --disable-logon` | Disable workstation OS smart card logon and restore PAM |
 | `sentinel --lock-on-removal` | Enable automatic desktop screen lock when card is removed |
+| `sentinel --no-lock-on-removal` | Disable automatic desktop screen lock on card removal |
 | `sentinel --agent` | Run background event daemon for desktop insert/removal notifications |
 | `sentinel --install-agent` | Install and enable user systemd service for card monitoring |
 | `sentinel --browsers` | Configure Firefox and Chrome/Chromium NSS databases only |
 | `sentinel --certs` | Install verified DoD Root CAs into operating system trust only |
 | `sentinel --reader-fix` | Apply OpenSC Broadcom reader driver hang fix |
+| `sentinel --check-update` | Check GitHub Releases for a newer SHA-256 verified version |
+| `sentinel --update` | Update Sentinel to the latest verified release tag or archive |
 | `sentinel --uninstall` | Revert all system changes, restore policies, and remove trust |
 
 ### Desktop Interface
@@ -108,7 +111,7 @@ Sentinel CAC Manager provides both a Libadwaita desktop application and an unatt
 Launch Sentinel from your application menu or run `sentinel`. The interface provides four primary workspaces:
 
 1. **Dashboard:** Live status overview of reader hardware, inserted card status, EDIPI, and middleware daemon.
-2. **Card Inspector:** Detailed inspection of on-card PIV Authentication, Email Signature, and Encryption certificates.
+2. **Card Inspector:** Detailed inspection of on-card PIV Authentication, Email Signature, and Encryption certificates with cryptographically verified OCSP checks.
 3. **Browser Health:** Profile-by-profile verification of Firefox, Chrome, Chromium, Brave, and Edge security devices.
 4. **System Diagnostics:** Distribution detection, package verification, and one-click repair actions.
 
@@ -125,13 +128,14 @@ Launch Sentinel from your application menu or run `sentinel`. The interface prov
 
 ## Limitations
 
-| Limitation | Status | Planned Resolution |
+| Limitation | Status | Details |
 |---|---|---|
-| On-Card PIN Change | Supported in v1.6.0 | Native NIST SP 800-73-4 APDU implementation |
-| Background Insert Daemon | Supported in v1.6.0 | Systemd user service via `sentinel --install-agent` |
-| Workstation Login (SSSD/PAM) | Supported in v2.0.0 | Authselect / SSSD integration with password fallback |
-| Lock on Card Removal | Supported in v2.0.0 | Automatic desktop lock via GDM and systemd sessions |
-| macOS / Windows Support | Unsupported | Linux only by design |
+| On-Card PIN Change | PIV Applet Only | Uses NIST SP 800-73-4 `CHANGE REFERENCE DATA` APDUs; refuses automated PIN change when only 1 retry remains to prevent card lockout. |
+| OCSP Revocation Check | Network Dependent | Verifies responder signature, `id-kp-OCSPSigning` EKU, CertID hashes, and freshness window; some DoD OCSP responders require NIPRNet/VPN access. |
+| Firefox Enterprise Policy | Installs Chain Bundle | Sets `ImportEnterpriseRoots: true` and loads `DoD_Full_Chain.pem` into Firefox so `.mil` servers omitting intermediate CAs still chain to DoD Roots. |
+| Distribution Validation | Hardware Tested on Fedora & Ubuntu | Arch Linux and openSUSE are supported via platform abstraction but have not been tested with physical CAC hardware in a VM. |
+| Workstation Login (PAM/SSSD) | Experimental / Archived | Hardened PAM/SSSD logon logic is archived in `archive/future_workstation_logon.py` pending multi-distro VM validation. |
+| macOS / Windows Support | Unsupported | Linux only by design. |
 
 ## License
 

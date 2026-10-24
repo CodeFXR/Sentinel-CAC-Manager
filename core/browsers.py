@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.platform_detector import (
     get_firefox_profile_dirs,
@@ -53,7 +54,6 @@ def get_firefox_policies_json_content(module_path: str, cert_path: str) -> str:
             },
             "SecurityDevices": {
                 "DoD CAC": module_path,
-                "DoW CAC": module_path,
             },
             "Preferences": {
                 "security.default_personal_cert": "Ask Every Time",
@@ -103,18 +103,43 @@ def configure_firefox_user_js(profile_dir: str) -> bool:
         return False
 
 
+def revert_firefox_user_js(profile_dir: str) -> bool:
+    """Remove Sentinel-managed lines from a Firefox profile user.js without losing user settings."""
+    user_js = os.path.join(profile_dir, "user.js")
+    if not os.path.isfile(user_js):
+        return True
+
+    sentinel_lines = {
+        "// Added by Sentinel CAC Manager",
+        'user_pref("security.default_personal_cert", "Ask Every Time");',
+        'user_pref("security.enterprise_roots.enabled", true);',
+    }
+    try:
+        with open(user_js, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+
+        kept = [ln for ln in lines if ln.strip() not in sentinel_lines]
+        if not any(ln.strip() for ln in kept):
+            os.remove(user_js)
+        else:
+            with open(user_js, "w", encoding="utf-8") as f:
+                f.writelines(kept)
+        return True
+    except OSError:
+        return False
+
+
 def configure_firefox_pkcs11_txt(profile_dir: str, module_path: str) -> bool:
     """Ensure DoD CAC security device is loaded in profile pkcs11.txt."""
     pkcs11_txt = os.path.join(profile_dir, "pkcs11.txt")
     if not os.path.isfile(pkcs11_txt):
-        # Create minimal valid pkcs11.txt
         content = (
-            f"library=\n"
-            f"name=NSS Internal PKCS #11 Module\n"
+            "library=\n"
+            "name=NSS Internal PKCS #11 Module\n"
             f"parameters=configdir='sql:{profile_dir}' certPrefix='' keyPrefix='' secmod='' flags= optimizeSpace\n"
-            f"NSS=Flags=internal,critical trustOrder=75 cipherOrder=100 slotParams=(1={{slotFlags=[ECC,RSA,DSA,DH,RC2,RC4,DES,RANDOM,SHA1,MD5,MD2,SSL,TLS,AES,Camellia,SEED,SHA256,SHA512] askpw=any timeout=30}})\n\n"
+            "NSS=Flags=internal,critical trustOrder=75 cipherOrder=100 slotParams=(1={slotFlags=[ECC,RSA,DSA,DH,RC2,RC4,DES,RANDOM,SHA1,MD5,MD2,SSL,TLS,AES,Camellia,SEED,SHA256,SHA512] askpw=any timeout=30})\n\n"
             f"library={module_path}\n"
-            f"name=DoD CAC\n\n"
+            "name=DoD CAC\n\n"
         )
         try:
             with open(pkcs11_txt, "w", encoding="utf-8") as f:
@@ -128,11 +153,9 @@ def configure_firefox_pkcs11_txt(profile_dir: str, module_path: str) -> bool:
         with open(pkcs11_txt, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
 
-        # Check if DoD CAC or the module is already registered
         if "name=DoD CAC" in content or "name=DoW CAC" in content or module_path in content or "p11-kit-proxy" in content:
             return True
 
-        # Append DoD CAC module
         block = f"\nlibrary={module_path}\nname=DoD CAC\n\n"
         with open(pkcs11_txt, "a", encoding="utf-8") as f:
             f.write(block)
@@ -142,15 +165,48 @@ def configure_firefox_pkcs11_txt(profile_dir: str, module_path: str) -> bool:
         return False
 
 
-def configure_p11_kit_user_module(module_path: str) -> bool:
-    """Create ~/.config/pkcs11/modules/opensc.module for user-level p11-kit."""
-    user_mod_dir = os.path.join(os.path.expanduser("~"), ".config", "pkcs11", "modules")
+def revert_firefox_pkcs11_txt(profile_dir: str) -> bool:
+    """Remove DoD CAC / DoW CAC blocks from a Firefox profile pkcs11.txt."""
+    pkcs11_txt = os.path.join(profile_dir, "pkcs11.txt")
+    if not os.path.isfile(pkcs11_txt):
+        return True
+
+    try:
+        with open(pkcs11_txt, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+
+        # Remove paragraphs where name=DoD CAC or name=DoW CAC
+        cleaned = re.sub(
+            r"\n?library=[^\n]+\nname=Do[DW] CAC\n*",
+            "\n",
+            content,
+        )
+        with open(pkcs11_txt, "w", encoding="utf-8") as f:
+            f.write(cleaned)
+        return True
+    except OSError:
+        return False
+
+
+def configure_p11_kit_user_module(module_path: str, home_dir: Optional[str] = None) -> bool:
+    """Create ~/.config/pkcs11/modules/sentinel-opensc.module for user-level p11-kit."""
+    home = home_dir or os.path.expanduser("~")
+    user_mod_dir = os.path.join(home, ".config", "pkcs11", "modules")
     os.makedirs(user_mod_dir, exist_ok=True)
-    mod_file = os.path.join(user_mod_dir, "opensc.module")
+    mod_file = os.path.join(user_mod_dir, "sentinel-opensc.module")
     content = f"# Configured by Sentinel CAC Manager\nmodule: {module_path}\n"
     try:
         with open(mod_file, "w", encoding="utf-8") as f:
             f.write(content)
+        # Clean up legacy opensc.module if created by Sentinel
+        legacy_mod = os.path.join(user_mod_dir, "opensc.module")
+        if os.path.isfile(legacy_mod):
+            try:
+                with open(legacy_mod, "r", encoding="utf-8", errors="replace") as fl:
+                    if "Sentinel CAC Manager" in fl.read():
+                        os.remove(legacy_mod)
+            except OSError:
+                pass
         return True
     except OSError as e:
         logger.error(f"Failed to write p11-kit user module: {e}")
@@ -177,14 +233,16 @@ def configure_snap_firefox(module_path: str, log_fn=None) -> bool:
 
 
 def configure_chrome_nssdb(module_path: str, log_fn=None) -> Tuple[bool, str]:
-    """Configure ~/.pki/nssdb for Chrome, Chromium, Edge, and Brave."""
+    """Configure ~/.pki/nssdb for Chrome, Chromium, Edge, and Brave with postcondition verification."""
     nssdb = get_nssdb_dir()
     os.makedirs(nssdb, exist_ok=True)
 
     certutil = shutil.which("certutil")
     modutil = shutil.which("modutil")
 
-    if not os.path.isfile(os.path.join(nssdb, "cert9.db")) and certutil:
+    if not os.path.isfile(os.path.join(nssdb, "cert9.db")):
+        if not certutil:
+            return False, "certutil binary not found (install nss-tools / libnss3-tools)"
         try:
             subprocess.run([certutil, "-N", "-d", f"sql:{nssdb}", "--empty-password"], check=True, timeout=3)
             if log_fn:
@@ -195,20 +253,18 @@ def configure_chrome_nssdb(module_path: str, log_fn=None) -> Tuple[bool, str]:
     if not modutil:
         return False, "modutil binary not found (install nss-tools / libnss3-tools)"
 
-    # Check existing modules in ~/.pki/nssdb
     try:
-        res_list = subprocess.run([modutil, "-dbdir", f"sql:{nssdb}", "-list"], capture_output=True, text=True, timeout=4)
+        res_list = subprocess.run([modutil, "-dbdir", f"sql:{nssdb}", "-list"], capture_output=True, text=True, timeout=6)
         list_out = res_list.stdout
         if "DoD CAC" in list_out or "DoW CAC" in list_out or "p11-kit-proxy" in list_out or "OpenSC" in list_out:
             if log_fn:
                 log_fn("[Chrome] Smart card module already active in ~/.pki/nssdb")
         else:
-            # Register module. Note: feeding input=b'\n' prevents interactive prompt hanging!
             res_add = subprocess.run(
                 [modutil, "-force", "-dbdir", f"sql:{nssdb}", "-add", "DoD CAC", "-libfile", module_path],
                 input=b"\n",
                 capture_output=True,
-                timeout=5,
+                timeout=6,
             )
             if res_add.returncode == 0:
                 if log_fn:
@@ -216,17 +272,96 @@ def configure_chrome_nssdb(module_path: str, log_fn=None) -> Tuple[bool, str]:
             else:
                 err = res_add.stderr.decode(errors="replace").strip()
                 if log_fn:
-                    log_fn(f"[Chrome] modutil note: {err}")
+                    log_fn(f"[Chrome] modutil error: {err}")
+                return False, f"Failed to register PKCS#11 module in ~/.pki/nssdb: {err}"
     except Exception as e:
         logger.warning(f"Chrome modutil error: {e}")
+        return False, f"Chrome modutil error: {e}"
 
-    # Import root CAs into ~/.pki/nssdb
     from core.certificates import import_root_cas_to_nss
     count, errors = import_root_cas_to_nss(nssdb, log_fn)
     if log_fn:
         log_fn(f"[Chrome] Imported {count} DoD CA certificates into ~/.pki/nssdb")
+    if errors:
+        return False, f"Chrome NSS CA import errors: {'; '.join(errors)}"
 
     return True, "Chrome NSS DB configured successfully"
+
+
+def uninstall_all_browsers(home_dir: Optional[str] = None, log_fn=None) -> bool:
+    """Revert user-level browser configurations: NSS module, imported CAs, user.js, pkcs11.txt, and Snap driver."""
+    from core.certificates import remove_sentinel_cas_from_nss
+
+    home = home_dir or os.path.expanduser("~")
+    nssdb = os.path.join(home, ".pki", "nssdb")
+    modutil = shutil.which("modutil")
+
+    # 1. Remove DoD CAC module and Sentinel CAs from ~/.pki/nssdb
+    if os.path.isdir(nssdb):
+        if modutil:
+            for mod_name in ("DoD CAC", "DoW CAC"):
+                try:
+                    res = subprocess.run(
+                        [modutil, "-force", "-dbdir", f"sql:{nssdb}", "-delete", mod_name],
+                        input=b"\n",
+                        capture_output=True,
+                        timeout=6,
+                    )
+                    if res.returncode == 0 and log_fn:
+                        log_fn(f"Removed '{mod_name}' PKCS#11 module from {nssdb}")
+                except Exception:
+                    pass
+        remove_sentinel_cas_from_nss(nssdb, log_fn=log_fn)
+
+    # 2. Revert Firefox profiles (user.js, pkcs11.txt, cert9.db)
+    search_roots = [
+        os.path.join(home, ".mozilla", "firefox"),
+        os.path.join(home, "snap", "firefox", "common", ".mozilla", "firefox"),
+        os.path.join(home, ".var", "app", "org.mozilla.firefox", ".mozilla", "firefox"),
+    ]
+    profiles: List[str] = []
+    for root in search_roots:
+        if not os.path.isdir(root):
+            continue
+        try:
+            for entry in os.listdir(root):
+                cand = os.path.join(root, entry)
+                if os.path.isdir(cand) and (
+                    os.path.isfile(os.path.join(cand, "cert9.db"))
+                    or os.path.isfile(os.path.join(cand, "prefs.js"))
+                    or os.path.isfile(os.path.join(cand, "user.js"))
+                ):
+                    profiles.append(cand)
+        except OSError:
+            pass
+
+    for p in profiles:
+        revert_firefox_user_js(p)
+        revert_firefox_pkcs11_txt(p)
+        remove_sentinel_cas_from_nss(p, log_fn=log_fn)
+
+    # 3. Remove staged Snap driver if present
+    snap_driver = os.path.join(home, "snap", "firefox", "common", "opensc-pkcs11.so")
+    if os.path.isfile(snap_driver):
+        try:
+            os.remove(snap_driver)
+            if log_fn:
+                log_fn(f"Removed staged Snap driver: {snap_driver}")
+        except OSError:
+            pass
+
+    # 4. Remove user p11-kit module configs created by Sentinel
+    for mod_fname in ("sentinel-opensc.module", "opensc.module"):
+        mod_path = os.path.join(home, ".config", "pkcs11", "modules", mod_fname)
+        if os.path.isfile(mod_path):
+            try:
+                with open(mod_path, "r", encoding="utf-8", errors="replace") as f:
+                    if "Sentinel" in f.read() or mod_fname == "sentinel-opensc.module":
+                        os.remove(mod_path)
+            except OSError:
+                pass
+
+    return True
 
 
 def configure_all_browsers(log_fn=None) -> Dict[str, Any]:
@@ -239,14 +374,19 @@ def configure_all_browsers(log_fn=None) -> Dict[str, Any]:
         "errors": [],
     }
 
-    # Warn if active browser instances are running (SEC-07)
     if is_browser_running("firefox"):
         if log_fn:
-            log_fn("[WARNING] Firefox is currently running! Please restart Firefox after configuration to load the new smart card device.")
+            log_fn(
+                "[WARNING] Firefox is currently running! Please restart Firefox after configuration "
+                "to load the new smart card device."
+            )
     for b_proc in ["chrome", "chromium", "brave", "edge"]:
         if is_browser_running(b_proc):
             if log_fn:
-                log_fn(f"[WARNING] {b_proc} is currently running! Please restart it after configuration to release NSS database locks.")
+                log_fn(
+                    f"[WARNING] {b_proc} is currently running! Please restart it after configuration "
+                    "to release NSS database locks."
+                )
             break
 
     module_path = find_opensc_module()
@@ -263,7 +403,7 @@ def configure_all_browsers(log_fn=None) -> Dict[str, Any]:
     # 1. User-level p11-kit module
     configure_p11_kit_user_module(module_path)
     if log_fn:
-        log_fn("[+] Configured user p11-kit module (~/.config/pkcs11/modules/opensc.module)")
+        log_fn("[+] Configured user p11-kit module (~/.config/pkcs11/modules/sentinel-opensc.module)")
 
     # 2. Configure Firefox User Profiles
     profiles = get_firefox_profile_dirs()
@@ -271,34 +411,38 @@ def configure_all_browsers(log_fn=None) -> Dict[str, Any]:
     if log_fn:
         log_fn(f"Found {len(profiles)} Firefox profile(s) to configure.")
 
+    ff_profile_errors = 0
     for p in profiles:
         p_name = os.path.basename(p)
         if log_fn:
             log_fn(f"-> Configuring Firefox Profile: {p_name}")
 
-        # A. user.js (security.default_personal_cert = Ask Every Time)
         if configure_firefox_user_js(p):
             if log_fn:
                 log_fn("   [OK] Set 'Ask Every Time' & enterprise roots in user.js")
         else:
             results["errors"].append(f"Failed to write user.js in {p_name}")
+            ff_profile_errors += 1
 
-        # B. pkcs11.txt
         if configure_firefox_pkcs11_txt(p, module_path):
             if log_fn:
                 log_fn("   [OK] Loaded DoD CAC module in pkcs11.txt")
         else:
             results["errors"].append(f"Failed to update pkcs11.txt in {p_name}")
+            ff_profile_errors += 1
 
-        # C. Import CAs into cert9.db
         from core.certificates import import_root_cas_to_nss
         cnt, errs = import_root_cas_to_nss(p, log_fn=None)
         if log_fn:
             log_fn(f"   [OK] Imported {cnt} DoD CAs into cert9.db")
         if errs:
             results["errors"].extend(errs)
+            ff_profile_errors += len(errs)
 
-    results["firefox_ok"] = True
+    b_stat_after = check_browsers_status()
+    results["firefox_ok"] = (ff_profile_errors == 0) and (
+        b_stat_after.firefox_policy_active or b_stat_after.firefox_module_loaded
+    )
 
     # 3. Configure Snap Firefox if present
     if is_snap_firefox_installed():
@@ -318,32 +462,31 @@ def check_browsers_status() -> BrowserStatus:
     """Inspect and report health of Firefox and Chrome smart card configurations."""
     profiles = get_firefox_profile_dirs()
     ff_installed = bool(shutil.which("firefox")) or bool(profiles)
-    
-    # Check if Firefox policy is in place
+
     ff_policy_active = False
     policy_candidates = [
         "/etc/firefox/policies/policies.json",
         "/usr/lib/firefox/distribution/policies.json",
         "/usr/lib64/firefox/distribution/policies.json",
+        "/var/snap/firefox/common/policies/policies.json",
     ]
     for pc in policy_candidates:
         if os.path.isfile(pc):
             try:
-                with open(pc) as f:
+                with open(pc, encoding="utf-8", errors="replace") as f:
                     if "DoW CAC" in f.read() or "DoD CAC" in f.read():
                         ff_policy_active = True
                         break
             except Exception:
                 pass
 
-    # Check user.js and pkcs11.txt in profiles
     ff_prompt = False
     ff_module = False
     for p in profiles:
         ujs = os.path.join(p, "user.js")
         if os.path.isfile(ujs):
             try:
-                with open(ujs) as f:
+                with open(ujs, encoding="utf-8", errors="replace") as f:
                     if "Ask Every Time" in f.read():
                         ff_prompt = True
             except Exception:
@@ -352,21 +495,30 @@ def check_browsers_status() -> BrowserStatus:
         p11 = os.path.join(p, "pkcs11.txt")
         if os.path.isfile(p11):
             try:
-                with open(p11) as f:
+                with open(p11, encoding="utf-8", errors="replace") as f:
                     content = f.read()
                     if "DoW CAC" in content or "DoD CAC" in content or "opensc-pkcs11" in content or "p11-kit-proxy" in content:
                         ff_module = True
             except Exception:
                 pass
 
-    # Check Chrome
     nssdb = get_nssdb_dir()
-    chrome_installed = bool(shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("microsoft-edge") or shutil.which("brave-browser"))
+    chrome_installed = bool(
+        shutil.which("google-chrome")
+        or shutil.which("chromium")
+        or shutil.which("microsoft-edge")
+        or shutil.which("brave-browser")
+    )
     chrome_db_exists = os.path.isfile(os.path.join(nssdb, "cert9.db"))
     chrome_module = False
     if chrome_db_exists and shutil.which("modutil"):
         try:
-            res = subprocess.run([shutil.which("modutil"), "-dbdir", f"sql:{nssdb}", "-list"], capture_output=True, text=True, timeout=6)
+            res = subprocess.run(
+                [shutil.which("modutil"), "-dbdir", f"sql:{nssdb}", "-list"],
+                capture_output=True,
+                text=True,
+                timeout=6,
+            )
             if "DoW CAC" in res.stdout or "DoD CAC" in res.stdout or "p11-kit-proxy" in res.stdout or "OpenSC" in res.stdout:
                 chrome_module = True
         except Exception:

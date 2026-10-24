@@ -8,9 +8,11 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
 
+from core import __version__
 from core.platform_detector import detect_platform, PlatformInfo
 from core.smartcard import SmartCardStatus
 from core.certificates import is_system_trust_installed
+from core.updater import check_for_updates, perform_update, UpdateInfo
 from core.browsers import (
     check_browsers_status,
     configure_all_browsers,
@@ -90,10 +92,10 @@ class SystemView(Gtk.Box):
         # 2. Certificates Group
         self.cert_group = Adw.PreferencesGroup()
         self.cert_group.set_title("DoD Certificate Authority Store")
-        self.cert_group.set_description("Installs all DoD Root and Intermediate CAs into system trust:")
+        self.cert_group.set_description("Installs DoD Root CAs into system trust and intermediate CAs into browser NSS stores:")
 
         self.sys_cert_row = Adw.ActionRow(title="System CA Trust Store")
-        self.sys_cert_row.set_subtitle("DoD Root CA 3, 4, 5, 6, ID CAs 59-81, Email CAs 59-81")
+        self.sys_cert_row.set_subtitle("DoD Root CA 3, 4, 5, 6 (System Trust) + DoD ID/Email CAs (Browser NSS)")
         self.sys_cert_badge = Gtk.Label(label="Checking")
         self.sys_cert_badge.add_css_class("badge-info")
         self.sys_cert_row.add_suffix(self.sys_cert_badge)
@@ -141,24 +143,12 @@ class SystemView(Gtk.Box):
 
         self.content_box.append(self.browser_group)
 
-        # 4. Workstation Smart Card Logon (PAM & SSSD)
+        # 4. Workstation Session Security
         self.logon_group = Adw.PreferencesGroup()
-        self.logon_group.set_title("Workstation Smart Card Logon (PAM & SSSD)")
+        self.logon_group.set_title("Workstation Session Security")
         self.logon_group.set_description(
-            "Log in to your Linux desktop (GDM / console) with your CAC. Password fallback remains available."
+            "Automatically lock your desktop session when your smart card is removed from the reader."
         )
-
-        self.logon_row = Adw.ActionRow(title="Smart Card System Authentication")
-        self.logon_row.set_subtitle("Checking PAM / SSSD configuration...")
-        self.logon_badge = Gtk.Label(label="Checking")
-        self.logon_badge.add_css_class("badge-info")
-        self.logon_row.add_suffix(self.logon_badge)
-
-        self.logon_btn = Gtk.Button(label="Enable...")
-        self.logon_btn.add_css_class("suggested-action")
-        self.logon_btn.connect("clicked", self.on_toggle_logon)
-        self.logon_row.add_suffix(self.logon_btn)
-        self.logon_group.add(self.logon_row)
 
         self.lock_removal_row = Adw.ActionRow(title="Lock Screen on Smart Card Removal")
         self.lock_removal_row.set_subtitle("Automatically lock desktop session when CAC is removed")
@@ -169,6 +159,28 @@ class SystemView(Gtk.Box):
         self.logon_group.add(self.lock_removal_row)
 
         self.content_box.append(self.logon_group)
+
+        # 5. Application Version & Updates
+        self.update_group = Adw.PreferencesGroup()
+        self.update_group.set_title("Application Version & Updates")
+        self.update_group.set_description(
+            "Check for verified Sentinel releases from GitHub (pinned tags and SHA-256 checksum verification)."
+        )
+
+        self.update_row = Adw.ActionRow(title=f"Sentinel CAC Manager v{__version__}")
+        self.update_row.set_subtitle("Release channel: GitHub Releases (SHA-256 verified)")
+        self.update_badge = Gtk.Label(label=f"v{__version__}")
+        self.update_badge.add_css_class("badge-info")
+        self.update_row.add_suffix(self.update_badge)
+
+        self.check_update_btn = Gtk.Button(label="Check for Updates")
+        self.check_update_btn.add_css_class("flat")
+        self.check_update_btn.connect("clicked", self.on_check_updates)
+        self.update_row.add_suffix(self.check_update_btn)
+        self.update_group.add(self.update_row)
+
+        self.content_box.append(self.update_group)
+        self._latest_update_info: UpdateInfo | None = None
 
     def update_status(self, plat: PlatformInfo, card_stat: SmartCardStatus):
         b_stat = check_browsers_status()
@@ -200,13 +212,13 @@ class SystemView(Gtk.Box):
             self.opensc_badge.add_css_class("badge-danger")
 
         # 3. Reader hang fix
-        # Check if /etc/opensc.conf has card_drivers
+        from core.privileged_helper import is_opensc_config_optimized
         hang_fixed = False
         for c in ["/etc/opensc/opensc.conf", "/etc/opensc.conf"]:
             if os.path.isfile(c):
                 try:
-                    with open(c) as f:
-                        if "piv-II" in f.read():
+                    with open(c, "r", encoding="utf-8", errors="replace") as f:
+                        if is_opensc_config_optimized(f.read()):
                             hang_fixed = True
                             break
                 except OSError:
@@ -260,30 +272,9 @@ class SystemView(Gtk.Box):
             self.chrome_badge.add_css_class("badge-warning")
             self.chrome_row.set_subtitle("Smart card module not registered in ~/.pki/nssdb")
 
-        # 7. Workstation Smart Card Logon (PAM & SSSD)
+        # 7. Workstation Session Lock on Removal
         from core.system_fix import check_smartcard_logon_status
         l_stat = check_smartcard_logon_status()
-        self._logon_enabled = l_stat["logon_enabled"]
-
-        if l_stat["logon_enabled"]:
-            self.logon_row.set_subtitle("Enabled (SSSD / PAM configured; password fallback active)")
-            self.logon_badge.set_label("Enabled")
-            self.logon_badge.remove_css_class("badge-info")
-            self.logon_badge.remove_css_class("badge-warning")
-            self.logon_badge.add_css_class("badge-success")
-            self.logon_btn.set_label("Disable")
-            self.logon_btn.remove_css_class("suggested-action")
-            self.logon_btn.add_css_class("flat")
-        else:
-            self.logon_row.set_subtitle("Not configured (Desktop requires password to authenticate)")
-            self.logon_badge.set_label("Not Configured")
-            self.logon_badge.remove_css_class("badge-info")
-            self.logon_badge.remove_css_class("badge-success")
-            self.logon_badge.add_css_class("badge-warning")
-            self.logon_btn.set_label("Enable...")
-            self.logon_btn.remove_css_class("flat")
-            self.logon_btn.add_css_class("suggested-action")
-
         self.lock_removal_switch.set_active(l_stat["lock_removal_enabled"])
 
     def on_start_pcscd(self, btn):
@@ -334,7 +325,7 @@ class SystemView(Gtk.Box):
 
     def _after_action(self, ok: bool, title: str, msg: str):
         self.main_window.show_toast(title if ok else f"Action failed: {msg}")
-        self.main_window.refresh_all_status()
+        self.main_window.refresh_all_status(force=True)
 
     def on_lock_removal_switch_toggled(self, switch, state):
         from core.system_fix import set_lock_on_removal
@@ -343,104 +334,90 @@ class SystemView(Gtk.Box):
         self.main_window.show_toast(f"Screen lock on smart card removal {action_name}.")
         return False
 
-    def on_toggle_logon(self, btn):
-        if getattr(self, "_logon_enabled", False):
-            btn.set_sensitive(False)
-            def worker():
-                from core.system_fix import disable_workstation_logon
-                ok, msg = disable_workstation_logon(log_fn=self.main_window.append_log)
-                GLib.idle_add(self._after_action, ok, "Workstation smart card logon disabled", msg)
-            threading.Thread(target=worker, daemon=True).start()
+    def on_check_updates(self, btn):
+        if self._latest_update_info and self._latest_update_info.update_available:
+            self._prompt_confirm_update(self._latest_update_info)
+            return
+
+        btn.set_sensitive(False)
+        btn.set_label("Checking...")
+        threading.Thread(target=self._run_check_updates, daemon=True).start()
+
+    def _run_check_updates(self):
+        info = check_for_updates()
+        GLib.idle_add(self._after_check_updates, info)
+
+    def _after_check_updates(self, info: UpdateInfo):
+        self._latest_update_info = info
+        self.check_update_btn.set_sensitive(True)
+        self.update_row.set_subtitle(info.status_message)
+
+        self.update_badge.remove_css_class("badge-info")
+        self.update_badge.remove_css_class("badge-success")
+        self.update_badge.remove_css_class("badge-warning")
+
+        if info.update_available:
+            self.update_badge.set_label(f"Update: {info.tag_name}")
+            self.update_badge.add_css_class("badge-warning")
+            self.check_update_btn.set_label("Update Now")
+            self.check_update_btn.remove_css_class("flat")
+            self.check_update_btn.add_css_class("suggested-action")
+            self.main_window.show_toast(info.status_message)
+            self._prompt_confirm_update(info)
+        elif info.error:
+            self.update_badge.set_label(f"v{__version__}")
+            self.update_badge.add_css_class("badge-info")
+            self.check_update_btn.set_label("Check for Updates")
+            self.main_window.show_toast(info.status_message)
         else:
-            self._show_enable_logon_dialog()
+            self.update_badge.set_label("Up to Date")
+            self.update_badge.add_css_class("badge-success")
+            self.check_update_btn.set_label("Check for Updates")
+            self.main_window.show_toast(f"Sentinel v{__version__} is up to date.")
 
-    def _show_enable_logon_dialog(self):
-        import getpass
-        current_user = getpass.getuser()
-        card_stat = getattr(self.main_window, "card_status", None)
-        holder_name = None
-        edipi = None
-        if card_stat and card_stat.card_present and card_stat.primary_certificate:
-            holder_name = card_stat.primary_certificate.holder_name
-            edipi = card_stat.primary_certificate.edipi
-
-        dialog = Adw.Window(title="Configure Workstation Smart Card Logon", modal=True, transient_for=self.main_window)
-        dialog.set_default_size(460, 380)
-
-        header = Adw.HeaderBar()
-        header.set_show_end_title_buttons(True)
-
-        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-        main_box.append(header)
-
-        clamp = Adw.Clamp()
-        clamp.set_maximum_size(420)
-        clamp.set_margin_start(16)
-        clamp.set_margin_end(16)
-        clamp.set_margin_bottom(24)
-
-        form_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-
-        info_label = Gtk.Label(
-            label="Enables smart card authentication (GDM/console) via SSSD and PAM. Password fallback is always retained if your card is not inserted.",
-            wrap=True,
-            xalign=0,
+    def _prompt_confirm_update(self, info: UpdateInfo):
+        dialog = Adw.MessageDialog.new(
+            self.main_window,
+            f"Update Available ({info.tag_name})",
+            f"A newer release of Sentinel CAC Manager ({info.tag_name}) is available.\n\n"
+            f"Installed version: v{info.current_version}\n"
+            f"Latest release: {info.tag_name}\n"
+            f"Verification: Pinned Git Tag / SHA-256 Digest",
         )
-        info_label.add_css_class("dim-label")
-        form_box.append(info_label)
+        dialog.add_response("cancel", "Later")
+        dialog.add_response("update", "Update Now")
+        dialog.set_response_appearance("update", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("update")
+        dialog.set_close_response("cancel")
 
-        group = Adw.PreferencesGroup()
-        user_row = Adw.ActionRow(title="Target Linux User Account", subtitle=current_user)
-        group.add(user_row)
+        def _on_response(dlg, response_id):
+            if response_id == "update":
+                self.check_update_btn.set_sensitive(False)
+                self.check_update_btn.set_label("Updating...")
+                threading.Thread(
+                    target=self._run_perform_update,
+                    args=(info,),
+                    daemon=True,
+                ).start()
 
-        card_desc = f"{holder_name} (EDIPI: {edipi})" if (holder_name and edipi) else "Inserted Smart Card"
-        card_row = Adw.ActionRow(title="Mapped Smart Card Certificate", subtitle=card_desc)
-        group.add(card_row)
-
-        form_box.append(group)
-
-        spinner = Gtk.Spinner()
-        spinner.set_visible(False)
-        spinner.set_halign(Gtk.Align.CENTER)
-        form_box.append(spinner)
-
-        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        btn_box.set_halign(Gtk.Align.END)
-        btn_box.set_margin_top(8)
-
-        cancel_btn = Gtk.Button(label="Cancel")
-        cancel_btn.connect("clicked", lambda _: dialog.close())
-
-        confirm_btn = Gtk.Button(label="Enable Smart Card Logon")
-        confirm_btn.add_css_class("suggested-action")
-
-        def on_confirm(_btn):
-            confirm_btn.set_sensitive(False)
-            cancel_btn.set_sensitive(False)
-            spinner.set_visible(True)
-            spinner.start()
-
-            def worker():
-                from core.system_fix import enable_workstation_logon
-                ok, msg = enable_workstation_logon(target_user=current_user, edipi=edipi, log_fn=self.main_window.append_log)
-
-                def on_done():
-                    spinner.stop()
-                    spinner.set_visible(False)
-                    dialog.close()
-                    self._after_action(ok, "Workstation smart card logon configured", msg)
-                    return False
-
-                GLib.idle_add(on_done)
-
-            threading.Thread(target=worker, daemon=True).start()
-
-        confirm_btn.connect("clicked", on_confirm)
-        btn_box.append(cancel_btn)
-        btn_box.append(confirm_btn)
-        form_box.append(btn_box)
-
-        clamp.set_child(form_box)
-        main_box.append(clamp)
-        dialog.set_content(main_box)
+        dialog.connect("response", _on_response)
         dialog.present()
+
+    def _run_perform_update(self, info: UpdateInfo):
+        ok, msg = perform_update(info, log_fn=self.main_window.append_log)
+        GLib.idle_add(self._after_perform_update, ok, msg, info)
+
+    def _after_perform_update(self, ok: bool, msg: str, info: UpdateInfo):
+        self.check_update_btn.set_sensitive(True)
+        self.update_row.set_subtitle(msg)
+        self.main_window.show_toast(msg)
+        if ok:
+            self._latest_update_info = None
+            self.update_badge.remove_css_class("badge-warning")
+            self.update_badge.add_css_class("badge-success")
+            self.update_badge.set_label(f"Updated ({info.tag_name})")
+            self.check_update_btn.remove_css_class("suggested-action")
+            self.check_update_btn.add_css_class("flat")
+            self.check_update_btn.set_label("Restart Required")
+        else:
+            self.check_update_btn.set_label("Update Now")

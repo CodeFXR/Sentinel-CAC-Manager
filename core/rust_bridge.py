@@ -86,19 +86,58 @@ def get_rust_version() -> Optional[str]:
     return None
 
 
+def _parse_card_certificate_python_fallback(
+    cert_id: str,
+    label: str,
+    usage: str,
+    data: bytes,
+) -> Optional["CardCertificate"]:
+    """Pure-Python / OpenSSL fallback for parsing DER or PEM certificate bytes."""
+    import subprocess
+    from core.smartcard import _parse_x509_text
+
+    if not data or len(data) < 32:
+        return None
+
+    try:
+        res_x509 = subprocess.run(
+            ["openssl", "x509", "-inform", "DER", "-noout", "-subject", "-issuer", "-dates", "-serial"],
+            input=data,
+            capture_output=True,
+            timeout=3,
+        )
+        out = res_x509.stdout.decode(errors="replace")
+        if "subject=" not in out:
+            res_x509 = subprocess.run(
+                ["openssl", "x509", "-noout", "-subject", "-issuer", "-dates", "-serial"],
+                input=data,
+                capture_output=True,
+                timeout=3,
+            )
+            out = res_x509.stdout.decode(errors="replace")
+
+        if "subject=" in out:
+            parsed = _parse_x509_text(out, cert_id, label, usage)
+            parsed.raw_der = data
+            return parsed
+    except Exception as e:
+        logger.debug(f"Python certificate parser fallback failed for id={cert_id}: {e}")
+
+    return None
+
+
 def parse_card_certificate_rust(
     cert_id: str,
     label: str,
     usage: str,
     data: bytes,
 ) -> Optional["CardCertificate"]:
-    """Parse ASN.1 DER or PEM certificate bytes using Rust native accelerator.
+    """Parse ASN.1 DER or PEM certificate bytes using Rust native accelerator with pure-Python fallback.
 
-    Returns a populated CardCertificate dataclass, or None on parse failure or
-    if the Rust module is unavailable.
+    Returns a populated CardCertificate dataclass, or None on parse failure.
     """
     if not is_rust_available():
-        return None
+        return _parse_card_certificate_python_fallback(cert_id, label, usage, data)
 
     try:
         from core.smartcard import CardCertificate
@@ -142,7 +181,7 @@ def parse_card_certificate_rust(
         )
     except Exception as e:
         logger.debug(f"Rust parse_certificate failed for id={cert_id}: {e}")
-        return None
+        return _parse_card_certificate_python_fallback(cert_id, label, usage, data)
 
 
 def read_card_certificates_rust(reader_name: Optional[str] = None) -> List["CardCertificate"]:

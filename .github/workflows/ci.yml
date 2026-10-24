@@ -1,0 +1,60 @@
+name: Sentinel CAC Manager CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            shellcheck \
+            openssl \
+            python3-cryptography \
+            python3-distro \
+            libpcsclite-dev
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ruff linter
+        run: pip install ruff
+
+      - name: Lint shell scripts with ShellCheck
+        run: |
+          bash -n install
+          shellcheck install
+
+      - name: Lint Python codebase with Ruff
+        run: ruff check .
+
+      - name: Run Python unit tests in pure-Python fallback mode (no Rust binary)
+        run: |
+          rm -rf target native/sentinel_core/target core/libsentinel_core.so core/sentinel_core.so
+          python3 -m unittest discover -v
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Build and lint Rust native accelerator
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo build --release
+          cargo test --no-default-features
+
+      - name: Run Python unit tests with compiled Rust native accelerator
+        run: python3 -m unittest discover -v
