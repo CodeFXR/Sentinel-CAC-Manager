@@ -65,8 +65,9 @@ def get_firefox_policies_json_content(module_path: str, cert_path: str) -> str:
 
 
 def configure_firefox_user_js(profile_dir: str) -> bool:
-    """Configure security.default_personal_cert = 'Ask Every Time' in profile user.js."""
+    """Configure security.default_personal_cert = 'Ask Every Time' in profile user.js, recording pre-existing state."""
     user_js = os.path.join(profile_dir, "user.js")
+    snap_file = os.path.join(profile_dir, ".sentinel_user_js_snap.json")
     header = "// Added by Sentinel CAC Manager"
     pref_lines = [
         'user_pref("security.default_personal_cert", "Ask Every Time");',
@@ -74,10 +75,20 @@ def configure_firefox_user_js(profile_dir: str) -> bool:
     ]
 
     existing = ""
-    if os.path.isfile(user_js):
+    existed_before = os.path.isfile(user_js)
+    if existed_before:
         try:
             with open(user_js, "r", encoding="utf-8", errors="replace") as f:
                 existing = f.read()
+        except OSError:
+            pass
+
+    if not os.path.exists(snap_file) and not os.path.islink(snap_file):
+        try:
+            prior_present = [line for line in pref_lines if line in existing]
+            fd_snap = os.open(snap_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with open(fd_snap, "w", encoding="utf-8") as fs:
+                json.dump({"existed_before": existed_before, "prior_lines": prior_present}, fs)
         except OSError:
             pass
 
@@ -104,16 +115,33 @@ def configure_firefox_user_js(profile_dir: str) -> bool:
 
 
 def revert_firefox_user_js(profile_dir: str) -> bool:
-    """Remove Sentinel-managed lines from a Firefox profile user.js without losing user settings."""
+    """Remove only Sentinel-added lines from a Firefox profile user.js, preserving pre-existing user preferences."""
     user_js = os.path.join(profile_dir, "user.js")
+    snap_file = os.path.join(profile_dir, ".sentinel_user_js_snap.json")
+    prior_lines: set[str] = set()
+    if os.path.isfile(snap_file) and not os.path.islink(snap_file):
+        try:
+            with open(snap_file, "r", encoding="utf-8") as fs:
+                snap = json.load(fs)
+            if isinstance(snap, dict) and isinstance(snap.get("prior_lines"), list):
+                prior_lines = set(snap["prior_lines"])
+        except Exception:
+            prior_lines = set()
+
     if not os.path.isfile(user_js):
+        if os.path.isfile(snap_file):
+            try:
+                os.remove(snap_file)
+            except OSError:
+                pass
         return True
 
     sentinel_lines = {
         "// Added by Sentinel CAC Manager",
         'user_pref("security.default_personal_cert", "Ask Every Time");',
         'user_pref("security.enterprise_roots.enabled", true);',
-    }
+    } - prior_lines
+
     try:
         with open(user_js, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -124,6 +152,11 @@ def revert_firefox_user_js(profile_dir: str) -> bool:
         else:
             with open(user_js, "w", encoding="utf-8") as f:
                 f.writelines(kept)
+        if os.path.isfile(snap_file):
+            try:
+                os.remove(snap_file)
+            except OSError:
+                pass
         return True
     except OSError:
         return False
@@ -220,16 +253,22 @@ def configure_snap_firefox(module_path: str, log_fn=None) -> bool:
 
     home = os.path.expanduser("~")
     snap_common = os.path.join(home, "snap", "firefox", "common")
-    if os.path.isdir(snap_common):
-        target_driver = os.path.join(snap_common, "opensc-pkcs11.so")
+    if not os.path.isdir(snap_common):
         try:
-            shutil.copy2(module_path, target_driver)
-            if log_fn:
-                log_fn(f"[Snap] Staged OpenSC driver to {target_driver}")
-        except Exception as e:
-            logger.warning(f"Failed to copy opensc driver to Snap common: {e}")
+            os.makedirs(snap_common, exist_ok=True)
+        except OSError as e:
+            logger.warning(f"Snap Firefox common directory missing and could not be created: {e}")
+            return False
 
-    return True
+    target_driver = os.path.join(snap_common, "opensc-pkcs11.so")
+    try:
+        shutil.copy2(module_path, target_driver)
+        if log_fn:
+            log_fn(f"[Snap] Staged OpenSC driver to {target_driver}")
+        return os.path.isfile(target_driver)
+    except Exception as e:
+        logger.warning(f"Failed to copy opensc driver to Snap common: {e}")
+        return False
 
 
 def configure_chrome_nssdb(module_path: str, log_fn=None) -> Tuple[bool, str]:
@@ -256,10 +295,18 @@ def configure_chrome_nssdb(module_path: str, log_fn=None) -> Tuple[bool, str]:
     try:
         res_list = subprocess.run([modutil, "-dbdir", f"sql:{nssdb}", "-list"], capture_output=True, text=True, timeout=6)
         list_out = res_list.stdout
-        if "DoD CAC" in list_out or "DoW CAC" in list_out or "p11-kit-proxy" in list_out or "OpenSC" in list_out:
+        if ("DoD CAC" in list_out and module_path in list_out) or "p11-kit-proxy" in list_out:
             if log_fn:
                 log_fn("[Chrome] Smart card module already active in ~/.pki/nssdb")
         else:
+            if "DoD CAC" in list_out or "DoW CAC" in list_out:
+                for mod_name in ("DoD CAC", "DoW CAC"):
+                    subprocess.run(
+                        [modutil, "-force", "-dbdir", f"sql:{nssdb}", "-delete", mod_name],
+                        input=b"\n",
+                        capture_output=True,
+                        timeout=6,
+                    )
             res_add = subprocess.run(
                 [modutil, "-force", "-dbdir", f"sql:{nssdb}", "-add", "DoD CAC", "-libfile", module_path],
                 input=b"\n",
@@ -267,8 +314,16 @@ def configure_chrome_nssdb(module_path: str, log_fn=None) -> Tuple[bool, str]:
                 timeout=6,
             )
             if res_add.returncode == 0:
+                res_verify = subprocess.run(
+                    [modutil, "-dbdir", f"sql:{nssdb}", "-list"],
+                    capture_output=True,
+                    text=True,
+                    timeout=6,
+                )
+                if "DoD CAC" not in res_verify.stdout or module_path not in res_verify.stdout:
+                    return False, "Postcondition failed: 'DoD CAC' module or library path missing from modutil -list"
                 if log_fn:
-                    log_fn("[Chrome] Successfully registered DoD CAC module in ~/.pki/nssdb")
+                    log_fn("[Chrome] Successfully registered and verified DoD CAC module in ~/.pki/nssdb")
             else:
                 err = res_add.stderr.decode(errors="replace").strip()
                 if log_fn:
@@ -295,6 +350,7 @@ def uninstall_all_browsers(home_dir: Optional[str] = None, log_fn=None) -> bool:
     home = home_dir or os.path.expanduser("~")
     nssdb = os.path.join(home, ".pki", "nssdb")
     modutil = shutil.which("modutil")
+    all_ok = True
 
     # 1. Remove DoD CAC module and Sentinel CAs from ~/.pki/nssdb
     if os.path.isdir(nssdb):
@@ -310,7 +366,7 @@ def uninstall_all_browsers(home_dir: Optional[str] = None, log_fn=None) -> bool:
                     if res.returncode == 0 and log_fn:
                         log_fn(f"Removed '{mod_name}' PKCS#11 module from {nssdb}")
                 except Exception:
-                    pass
+                    all_ok = False
         remove_sentinel_cas_from_nss(nssdb, log_fn=log_fn)
 
     # 2. Revert Firefox profiles (user.js, pkcs11.txt, cert9.db)
@@ -333,11 +389,13 @@ def uninstall_all_browsers(home_dir: Optional[str] = None, log_fn=None) -> bool:
                 ):
                     profiles.append(cand)
         except OSError:
-            pass
+            all_ok = False
 
     for p in profiles:
-        revert_firefox_user_js(p)
-        revert_firefox_pkcs11_txt(p)
+        if not revert_firefox_user_js(p):
+            all_ok = False
+        if not revert_firefox_pkcs11_txt(p):
+            all_ok = False
         remove_sentinel_cas_from_nss(p, log_fn=log_fn)
 
     # 3. Remove staged Snap driver if present
@@ -348,7 +406,7 @@ def uninstall_all_browsers(home_dir: Optional[str] = None, log_fn=None) -> bool:
             if log_fn:
                 log_fn(f"Removed staged Snap driver: {snap_driver}")
         except OSError:
-            pass
+            all_ok = False
 
     # 4. Remove user p11-kit module configs created by Sentinel
     for mod_fname in ("sentinel-opensc.module", "opensc.module"):
@@ -359,9 +417,9 @@ def uninstall_all_browsers(home_dir: Optional[str] = None, log_fn=None) -> bool:
                     if "Sentinel" in f.read() or mod_fname == "sentinel-opensc.module":
                         os.remove(mod_path)
             except OSError:
-                pass
+                all_ok = False
 
-    return True
+    return all_ok
 
 
 def configure_all_browsers(log_fn=None) -> Dict[str, Any]:
@@ -370,7 +428,7 @@ def configure_all_browsers(log_fn=None) -> Dict[str, Any]:
         "firefox_profiles": 0,
         "firefox_ok": False,
         "chrome_ok": False,
-        "snap_ok": False,
+        "snap_ok": True,
         "errors": [],
     }
 
@@ -401,9 +459,11 @@ def configure_all_browsers(log_fn=None) -> Dict[str, Any]:
         log_fn(f"Using OpenSC PKCS#11 module: {module_path}")
 
     # 1. User-level p11-kit module
-    configure_p11_kit_user_module(module_path)
-    if log_fn:
-        log_fn("[+] Configured user p11-kit module (~/.config/pkcs11/modules/sentinel-opensc.module)")
+    if configure_p11_kit_user_module(module_path):
+        if log_fn:
+            log_fn("[+] Configured user p11-kit module (~/.config/pkcs11/modules/sentinel-opensc.module)")
+    else:
+        results["errors"].append("Failed to configure user p11-kit module (~/.config/pkcs11/modules/sentinel-opensc.module)")
 
     # 2. Configure Firefox User Profiles
     profiles = get_firefox_profile_dirs()
@@ -448,6 +508,8 @@ def configure_all_browsers(log_fn=None) -> Dict[str, Any]:
     if is_snap_firefox_installed():
         snap_ok = configure_snap_firefox(module_path, log_fn)
         results["snap_ok"] = snap_ok
+        if not snap_ok:
+            results["errors"].append("Failed to stage OpenSC PKCS#11 driver into Snap Firefox common directory")
 
     # 4. Configure Chrome / Chromium / Edge NSS DB
     c_ok, c_msg = configure_chrome_nssdb(module_path, log_fn)

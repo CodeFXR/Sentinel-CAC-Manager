@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 import hashlib
+import json
 import logging
 import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
-from typing import List, Optional, Set, Tuple
+import tempfile
+from typing import Dict, List, Optional, Set, Tuple
 
+from core.ca_manifest import (
+    DOD_CA_DER_FINGERPRINTS,
+    DOD_ROOT_DER_FINGERPRINTS,
+    DOD_ROOT_FILES,
+    validate_and_reserialize_cert,
+)
 from core.platform_detector import PlatformInfo, detect_platform
-from core.privileged_helper import DOD_ROOT_DER_FINGERPRINTS, DOD_ROOT_FILES
 
 logger = logging.getLogger("sentinel.certificates")
 
@@ -77,10 +84,11 @@ def _extract_file_der_hashes(path: str) -> Set[str]:
 
 
 def is_system_trust_installed(platform: Optional[PlatformInfo] = None) -> bool:
-    """Verify that all 4 required DoD Root CAs are installed and match their approved DER fingerprints."""
+    """Verify that all 4 required DoD Root CAs are installed in source anchors AND compiled OS trust bundle."""
     plat = platform or detect_platform()
     required_root_hashes = set(DOD_ROOT_DER_FINGERPRINTS.values())
 
+    source_ok = False
     if plat.is_debian_derivative:
         d = "/usr/local/share/ca-certificates/dod"
         found_hashes: Set[str] = set()
@@ -88,21 +96,81 @@ def is_system_trust_installed(platform: Optional[PlatformInfo] = None) -> bool:
             for fname in DOD_ROOT_FILES:
                 found_hashes |= _extract_file_der_hashes(os.path.join(d, fname))
         if required_root_hashes.issubset(found_hashes):
-            return True
-
-        # Fallback check in /etc/ssl/certs for extracted roots
-        etc_hashes: Set[str] = set()
-        for fname in ("DoD_Root_CA_3.pem", "DoD_Root_CA_4.pem", "DoD_Root_CA_5.pem", "DoD_Root_CA_6.pem"):
-            etc_hashes |= _extract_file_der_hashes(os.path.join("/etc/ssl/certs", fname))
-        return required_root_hashes.issubset(etc_hashes)
+            source_ok = True
+        else:
+            etc_hashes: Set[str] = set()
+            for fname in ("DoD_Root_CA_3.pem", "DoD_Root_CA_4.pem", "DoD_Root_CA_5.pem", "DoD_Root_CA_6.pem"):
+                etc_hashes |= _extract_file_der_hashes(os.path.join("/etc/ssl/certs", fname))
+            source_ok = required_root_hashes.issubset(etc_hashes)
     else:
         for candidate in ["DoD_Roots.pem", "DoD_Full_Chain.pem", "DoD_Full_Chain.crt", "DoW_Roots.pem"]:
             t = os.path.join(plat.trust_dir, candidate)
             if os.path.isfile(t):
                 found_hashes = _extract_file_der_hashes(t)
                 if required_root_hashes.issubset(found_hashes):
-                    return True
+                    source_ok = True
+                    break
+
+    if not source_ok:
         return False
+
+    # Also verify compiled OS trust store bundle when present on the host
+    compiled_bundles = [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+        "/etc/ca-certificates/extracted/tls-ca-bundle.pem",
+        "/var/lib/ca-certificates/ca-bundle.pem",
+    ]
+    for bundle in compiled_bundles:
+        if os.path.isfile(bundle):
+            bundle_hashes = _extract_file_der_hashes(bundle)
+            return required_root_hashes.issubset(bundle_hashes)
+
+    return True
+
+
+def _get_nss_cert_der_hash(certutil: str, db_dir: str, nickname: str) -> Optional[str]:
+    """Query an NSS database for nickname and return its canonical DER SHA-256 hex digest if present."""
+    try:
+        res = subprocess.run(
+            [certutil, "-d", f"sql:{db_dir}", "-L", "-n", nickname, "-a"],
+            capture_output=True,
+            timeout=3,
+        )
+        if res.returncode != 0 or not res.stdout:
+            return None
+        matches = _PEM_BLOCK_RE.findall(res.stdout)
+        if not matches:
+            return None
+        cleaned = re.sub(rb"\s+", b"", matches[0])
+        der = base64.b64decode(cleaned, validate=True)
+        return hashlib.sha256(der).hexdigest().lower()
+    except Exception:
+        return None
+
+
+def _load_nss_ownership(db_dir: str) -> Dict[str, dict]:
+    manifest_file = os.path.join(db_dir, ".sentinel_nss_manifest.json")
+    if not os.path.isfile(manifest_file) or os.path.islink(manifest_file):
+        return {}
+    try:
+        with open(manifest_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_nss_ownership(db_dir: str, data: Dict[str, dict]) -> None:
+    manifest_file = os.path.join(db_dir, ".sentinel_nss_manifest.json")
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=db_dir, delete=False, encoding="utf-8") as f_tmp:
+            tmp_name = f_tmp.name
+            json.dump(data, f_tmp, indent=2, sort_keys=True)
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, manifest_file)
+    except OSError:
+        pass
 
 
 def get_nss_installed_cas(db_dir: str) -> List[str]:
@@ -133,37 +201,18 @@ def get_nss_installed_cas(db_dir: str) -> List[str]:
         return []
 
 
-def _get_sentinel_nss_nicknames() -> List[str]:
-    """Return the exact list of certificate nicknames Sentinel imports into NSS databases."""
-    nicks = []
-    if os.path.isdir(ROOTS_DIR):
-        for f in sorted(os.listdir(ROOTS_DIR)):
-            if f.endswith(".crt"):
-                nicks.append(os.path.splitext(f)[0].replace("_", " "))
-    priority_cas = [
-        "DOD_ID_CA-81.crt",
-        "DOD_ID_CA-80.crt",
-        "DOD_ID_CA-79.crt",
-        "DOD_ID_CA-78.crt",
-        "DOD_ID_CA-71.crt",
-        "DOD_ID_CA-62.crt",
-        "DOD_EMAIL_CA-79.crt",
-        "DOD_EMAIL_CA-80.crt",
-        "DOD_EMAIL_CA-81.crt",
-        "DoD_WCF_Intermediate_CA_1.crt",
-    ]
-    for p in priority_cas:
-        nicks.append(os.path.splitext(p)[0].replace("_", " "))
-    return nicks
-
-
-def import_root_cas_to_nss(db_dir: str, log_fn=None) -> Tuple[int, List[str]]:
-    """Import Root CAs with CT,C,C trust and primary Issuing CAs into an NSS database."""
+def import_root_cas_to_nss(
+    db_dir: str,
+    log_fn=None,
+    roots_dir: Optional[str] = None,
+    intermediates_dir: Optional[str] = None,
+) -> Tuple[int, List[str]]:
+    """Import manifest-verified Root CAs with CT,, trust and non-expired Intermediate CAs into an NSS DB."""
     certutil = shutil.which("certutil")
     if not certutil or not os.path.isdir(db_dir):
         return 0, ["certutil binary or db directory missing"]
 
-    errors = []
+    errors: List[str] = []
     success_count = 0
 
     if not os.path.isfile(os.path.join(db_dir, "cert9.db")):
@@ -172,32 +221,64 @@ def import_root_cas_to_nss(db_dir: str, log_fn=None) -> Tuple[int, List[str]]:
         except Exception as e:
             return 0, [f"Failed to initialize NSS database: {e}"]
 
-    certs_to_import = []
-    if os.path.isdir(ROOTS_DIR):
-        for f in sorted(os.listdir(ROOTS_DIR)):
-            if f.endswith(".crt"):
-                certs_to_import.append((os.path.join(ROOTS_DIR, f), "CT,C,C", f))
+    r_dir = roots_dir or ROOTS_DIR
+    i_dir = intermediates_dir or INTERMEDIATES_DIR
 
-    priority_cas = [
-        "DOD_ID_CA-81.crt",
-        "DOD_ID_CA-80.crt",
-        "DOD_ID_CA-79.crt",
-        "DOD_ID_CA-78.crt",
-        "DOD_ID_CA-71.crt",
-        "DOD_ID_CA-62.crt",
-        "DOD_EMAIL_CA-79.crt",
-        "DOD_EMAIL_CA-80.crt",
-        "DOD_EMAIL_CA-81.crt",
-        "DoD_WCF_Intermediate_CA_1.crt",
-    ]
-    if os.path.isdir(INTERMEDIATES_DIR):
-        for p in priority_cas:
-            path = os.path.join(INTERMEDIATES_DIR, p)
-            if os.path.isfile(path):
-                certs_to_import.append((path, ",,", p))
+    certs_to_import: List[Tuple[str, str, str]] = []
+    if os.path.isdir(r_dir):
+        for f in sorted(os.listdir(r_dir)):
+            if f.endswith(".crt"):
+                # Use CT,, (TLS CA trust only; never grant unnecessary email/object-signing root trust)
+                certs_to_import.append((os.path.join(r_dir, f), "CT,,", f))
+
+    if os.path.isdir(i_dir):
+        for f in sorted(os.listdir(i_dir)):
+            if f.endswith(".crt"):
+                certs_to_import.append((os.path.join(i_dir, f), ",,", f))
+
+    ownership = _load_nss_ownership(db_dir)
 
     for cpath, trust, fname in certs_to_import:
         nick = os.path.splitext(fname)[0].replace("_", " ")
+        expected_der = DOD_CA_DER_FINGERPRINTS.get(fname)
+        if not expected_der:
+            errors.append(f"{nick}: Rejected unauthorized certificate '{fname}' (not in DoD DER manifest)")
+            continue
+
+        try:
+            if os.path.islink(cpath) or not os.path.isfile(cpath):
+                errors.append(f"{nick}: Rejected symlink or non-regular file '{cpath}'")
+                continue
+            with open(cpath, "rb") as f_cert:
+                raw_bytes = f_cert.read(1024 * 1024)
+        except OSError as e:
+            errors.append(f"{nick}: {e}")
+            continue
+
+        validated_pem = validate_and_reserialize_cert(raw_bytes, fname, verify_whitelist=True)
+        if not validated_pem:
+            # Skip expired intermediates gracefully, but treat any root or tampered file failure as an error
+            if fname not in DOD_ROOT_DER_FINGERPRINTS and b"-----BEGIN CERTIFICATE-----" in raw_bytes:
+                file_ders = _extract_file_der_hashes(cpath)
+                if file_ders == {expected_der}:
+                    if log_fn:
+                        log_fn(f"  [!] Skipping expired intermediate CA: {fname}")
+                    continue
+            errors.append(f"{nick}: Certificate failed cryptographic DER manifest or CA validation")
+            continue
+
+        # Check if nickname already exists in NSS DB before import
+        existing_der = _get_nss_cert_der_hash(certutil, db_dir, nick)
+        if existing_der is not None:
+            if existing_der == expected_der:
+                if nick not in ownership:
+                    ownership[nick] = {"pre_existing": True, "der_sha256": expected_der}
+                success_count += 1
+                continue
+            else:
+                errors.append(f"{nick}: Nickname collision in NSS DB with unexpected DER fingerprint ({existing_der})")
+                continue
+
         try:
             res = subprocess.run(
                 [certutil, "-d", f"sql:{db_dir}", "-A", "-t", trust, "-n", nick, "-i", cpath],
@@ -206,27 +287,48 @@ def import_root_cas_to_nss(db_dir: str, log_fn=None) -> Tuple[int, List[str]]:
                 timeout=4,
             )
             if res.returncode == 0:
-                success_count += 1
-                if log_fn:
-                    log_fn(f"  [+] Imported into NSS: {nick}")
+                verified_der = _get_nss_cert_der_hash(certutil, db_dir, nick)
+                if verified_der == expected_der:
+                    ownership[nick] = {"pre_existing": False, "der_sha256": expected_der}
+                    success_count += 1
+                    if log_fn:
+                        log_fn(f"  [+] Imported and verified in NSS: {nick}")
+                else:
+                    errors.append(f"{nick}: Post-import NSS verification failed")
             else:
-                err = res.stderr.strip()
-                if "already exists" not in err.lower():
-                    errors.append(f"{nick}: {err}")
+                errors.append(f"{nick}: {res.stderr.strip()}")
         except Exception as e:
             errors.append(f"{nick}: {e}")
 
+    _save_nss_ownership(db_dir, ownership)
     return success_count, errors
 
 
 def remove_sentinel_cas_from_nss(db_dir: str, log_fn=None) -> int:
-    """Remove only the DoD CA certificates imported by Sentinel from an NSS database."""
+    """Remove only DoD CA certificates that Sentinel created and whose DER hash matches the manifest."""
     certutil = shutil.which("certutil")
     if not certutil or not os.path.isfile(os.path.join(db_dir, "cert9.db")):
         return 0
 
+    ownership = _load_nss_ownership(db_dir)
+    all_allowed_ders = set(DOD_CA_DER_FINGERPRINTS.values())
     removed = 0
-    for nick in _get_sentinel_nss_nicknames():
+
+    candidates = list(ownership.keys()) if ownership else [
+        os.path.splitext(f)[0].replace("_", " ") for f in DOD_CA_DER_FINGERPRINTS.keys()
+    ]
+
+    for nick in candidates:
+        meta = ownership.get(nick, {})
+        if meta.get("pre_existing"):
+            continue
+        current_der = _get_nss_cert_der_hash(certutil, db_dir, nick)
+        if current_der is None:
+            ownership.pop(nick, None)
+            continue
+        if current_der not in all_allowed_ders:
+            continue
+
         try:
             res = subprocess.run(
                 [certutil, "-d", f"sql:{db_dir}", "-D", "-n", nick],
@@ -236,8 +338,19 @@ def remove_sentinel_cas_from_nss(db_dir: str, log_fn=None) -> int:
             )
             if res.returncode == 0:
                 removed += 1
+                ownership.pop(nick, None)
         except Exception:
             pass
+
+    manifest_file = os.path.join(db_dir, ".sentinel_nss_manifest.json")
+    if not ownership and os.path.isfile(manifest_file):
+        try:
+            os.remove(manifest_file)
+        except OSError:
+            pass
+    elif ownership:
+        _save_nss_ownership(db_dir, ownership)
+
     if removed and log_fn:
         log_fn(f"Removed {removed} Sentinel-managed DoD CA certificate(s) from {db_dir}")
     return removed

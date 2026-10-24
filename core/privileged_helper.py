@@ -148,29 +148,33 @@ def find_default_opensc_module() -> str:
 
 
 def validate_pkcs11_module_path(module_path: Optional[str]) -> Optional[str]:
-    """Validate that a PKCS#11 module path is safe, under /usr/lib* or /lib*, exists, is root-owned, and is not world-writable."""
+    """Validate that a PKCS#11 module path is safe, normalized, under /usr/lib* or /lib*, exists, is root-owned, and is not world-writable."""
     if not module_path:
         module_path = find_default_opensc_module()
     if any(c in module_path for c in ("\r", "\n", "\0", '"', "'", ";", "`", "$")):
         log(f"Security: Rejected PKCS#11 module path containing control/meta characters: {module_path!r}")
         return None
+    if ".." in module_path.split("/"):
+        log(f"Security: Rejected PKCS#11 module path containing '..' traversal: {module_path!r}")
+        return None
     if not SAFE_MODULE_PATH.match(module_path) or not module_path.startswith(("/usr/lib", "/lib", "/usr/local/lib")):
         log(f"Security: Rejected PKCS#11 module path failing format/prefix validation: {module_path!r}")
         return None
-    if not os.path.isfile(module_path):
-        log(f"Security: Rejected non-existent PKCS#11 module path: {module_path!r}")
+    real_path = os.path.realpath(module_path)
+    if not real_path.startswith(("/usr/lib", "/lib", "/usr/local/lib")) or not os.path.isfile(real_path):
+        log(f"Security: Rejected non-existent or out-of-prefix PKCS#11 module path: {module_path!r}")
         return None
     try:
-        st = os.stat(module_path)
+        st = os.stat(real_path)
         if st.st_uid != 0:
-            log(f"Security: Rejected non-root-owned PKCS#11 module: {module_path}")
+            log(f"Security: Rejected non-root-owned PKCS#11 module: {real_path}")
             return None
         if st.st_mode & stat.S_IWOTH:
-            log(f"Security: Rejected world-writable PKCS#11 module: {module_path}")
+            log(f"Security: Rejected world-writable PKCS#11 module: {real_path}")
             return None
     except OSError:
         return None
-    return module_path
+    return real_path
 
 
 def get_certs_dir(override: str = None) -> str:
@@ -285,7 +289,7 @@ def enable_pcscd() -> bool:
         return False
 
 
-def fix_opensc_hang():
+def fix_opensc_hang() -> bool:
     log("Configuring OpenSC reader compatibility...")
     candidates = ["/etc/opensc/opensc.conf", "/etc/opensc.conf"]
     target_conf = None
@@ -307,7 +311,7 @@ def fix_opensc_hang():
     # Check if card_drivers is already set in active (uncommented) configuration
     if is_opensc_config_optimized(original):
         log(f"OpenSC already optimized in {target_conf}")
-        return
+        return True
 
     # Backup if exists (prevent symlink overwrite attacks)
     bak = f"{target_conf}.sentinel-bak"
@@ -348,8 +352,10 @@ def fix_opensc_hang():
         os.chmod(tmp_name, 0o644)
         os.replace(tmp_name, target_conf)
         log(f"Optimized {target_conf} with CAC/PIV drivers.")
+        return True
     except Exception as e:
         log(f"Failed to update {target_conf}: {e}")
+        return False
 
 
 SAFE_CERT_FILENAME = re.compile(r"^[a-zA-Z0-9_.-]+\.(crt|pem)$")
@@ -496,6 +502,9 @@ def _validate_and_reserialize_cert(
 
         validated_pem = _verify_x509_ca_properties(der_bytes, require_self_signed=is_root_target)
         if not validated_pem:
+            if fname in ("DoD_Full_Chain.pem", "DoD_Full_Chain.crt", "DoW_Full_Chain.pem", "DoW_Full_Chain.crt"):
+                log(f"Skipping expired/retired intermediate block {idx + 1} in bundle '{fname}'")
+                continue
             log(f"Security: Rejected {fname}: certificate block {idx + 1} failed X.509 CA/validity verification")
             return None
         reserialized_certs.append(validated_pem)
@@ -508,7 +517,70 @@ def _validate_and_reserialize_cert(
             log(f"Security: Rejected '{fname}': root bundle does not contain all 4 required DoD Root CAs")
             return None
 
+    if not reserialized_certs:
+        return None
+
     return b"\n".join(reserialized_certs) + b"\n"
+
+
+def _file_content_matches_sentinel_manifest(filepath: str) -> bool:
+    """Return True only if filepath is a regular file whose content matches Sentinel's DoD CA manifest."""
+    if not os.path.isfile(filepath) or os.path.islink(filepath):
+        return False
+    fname = os.path.basename(filepath)
+    if fname not in DOD_CA_FINGERPRINTS and fname not in DOD_CA_DER_FINGERPRINTS:
+        return False
+    try:
+        with open(filepath, "rb") as f:
+            raw = f.read(5 * 1024 * 1024 + 1)
+        if len(raw) > 5 * 1024 * 1024:
+            return False
+        raw_sha256 = hashlib.sha256(raw).hexdigest().lower()
+        if raw_sha256 == DOD_CA_FINGERPRINTS.get(fname):
+            return True
+        pem_bodies = PEM_CERT_PATTERN.findall(raw)
+        if fname in DOD_CA_DER_FINGERPRINTS and len(pem_bodies) == 1:
+            der = _extract_der_from_pem_body(pem_bodies[0])
+            if der and hashlib.sha256(der).hexdigest().lower() == DOD_CA_DER_FINGERPRINTS[fname]:
+                return True
+        if fname in ("DoD_Roots.pem", "DoW_Roots.pem") and pem_bodies:
+            ders = [_extract_der_from_pem_body(b) for b in pem_bodies]
+            if all(ders) and {hashlib.sha256(d).hexdigest().lower() for d in ders if d} == set(DOD_ROOT_DER_FINGERPRINTS.values()):
+                return True
+        if fname in ("DoD_Full_Chain.pem", "DoD_Full_Chain.crt", "DoW_Full_Chain.pem", "DoW_Full_Chain.crt") and pem_bodies:
+            ders = [_extract_der_from_pem_body(b) for b in pem_bodies]
+            if all(ders) and {hashlib.sha256(d).hexdigest().lower() for d in ders if d}.issubset(set(DOD_CA_DER_FINGERPRINTS.values())):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _remove_or_restore_sentinel_cert_file(filepath: str) -> bool:
+    """Remove filepath only if its content matches Sentinel's manifest, restoring any pre-Sentinel backup."""
+    bak_path = f"{filepath}.pre-sentinel-bak"
+    if not os.path.exists(filepath) and not os.path.islink(filepath):
+        return False
+    if os.path.islink(filepath):
+        try:
+            os.remove(filepath)
+            return True
+        except OSError:
+            return False
+
+    if not _file_content_matches_sentinel_manifest(filepath):
+        log(f"Preserving administrator/non-Sentinel file: {filepath}")
+        return False
+
+    try:
+        if os.path.isfile(bak_path) and not os.path.islink(bak_path):
+            os.replace(bak_path, filepath)
+            log(f"Restored pre-existing administrator file from {bak_path} to {filepath}")
+        else:
+            os.remove(filepath)
+        return True
+    except OSError:
+        return False
 
 
 def _read_and_validate_cert(src_path: str, expected_dir: str, verify_whitelist: bool = True) -> Optional[bytes]:
@@ -566,7 +638,7 @@ def _read_and_validate_cert(src_path: str, expected_dir: str, verify_whitelist: 
 
 
 def _write_secure_cert(src_path: str, dst_path: str, expected_dir: str, verify_whitelist: bool = True) -> bool:
-    """Read, validate, and write certificate bytes with explicit non-executable mode 0644."""
+    """Read, validate, and write certificate bytes with explicit non-executable mode 0644, preserving any pre-existing non-Sentinel file."""
     data = _read_and_validate_cert(src_path, expected_dir, verify_whitelist=verify_whitelist)
     if not data:
         log(f"Skipping unvalidated or insecure certificate source: {src_path}")
@@ -574,6 +646,25 @@ def _write_secure_cert(src_path: str, dst_path: str, expected_dir: str, verify_w
 
     dst_dir = os.path.dirname(dst_path)
     os.makedirs(dst_dir, exist_ok=True)
+
+    # Preserve pre-existing administrator file if its content differs from Sentinel's manifest
+    bak_path = f"{dst_path}.pre-sentinel-bak"
+    if (
+        os.path.isfile(dst_path)
+        and not os.path.islink(dst_path)
+        and not _file_content_matches_sentinel_manifest(dst_path)
+        and not os.path.exists(bak_path)
+    ):
+        try:
+            with open(dst_path, "rb") as f_orig:
+                orig_bytes = f_orig.read()
+            fd_bak = os.open(bak_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            with open(fd_bak, "wb") as f_bak:
+                f_bak.write(orig_bytes)
+            log(f"Backed up pre-existing administrator certificate to {bak_path}")
+        except OSError as e:
+            log(f"Backup notice for {dst_path}: {e}")
+
     temp_dst = None
     try:
         with tempfile.NamedTemporaryFile(dir=dst_dir, delete=False) as f_out:
@@ -593,9 +684,10 @@ def _write_secure_cert(src_path: str, dst_path: str, expected_dir: str, verify_w
 
 
 def _clean_sentinel_owned_certs_in_dir(target_dir: str, keep_roots: bool = False) -> int:
-    """Remove only certificates explicitly known to belong to Sentinel's DoD manifest.
+    """Remove only certificates whose filename AND content match Sentinel's DoD manifest.
 
-    Never deletes third-party or administrator-placed certificates in shared directories.
+    Never deletes third-party or administrator-modified certificates in shared directories,
+    even if they share a filename with a DoD certificate.
     """
     if not os.path.isdir(target_dir):
         return 0
@@ -609,12 +701,8 @@ def _clean_sentinel_owned_certs_in_dir(target_dir: str, keep_roots: bool = False
             continue
         if existing in known_sentinel_files:
             p = os.path.join(target_dir, existing)
-            if os.path.isfile(p) or os.path.islink(p):
-                try:
-                    os.remove(p)
-                    removed += 1
-                except OSError:
-                    pass
+            if _remove_or_restore_sentinel_cert_file(p):
+                removed += 1
 
     # Only remove directory if we are not keeping roots and the directory is now completely empty
     if not keep_roots:
@@ -674,12 +762,7 @@ def install_system_certificates(distro_family: str) -> bool:
         target_dir = "/etc/pki/ca-trust/source/anchors"
         os.makedirs(target_dir, exist_ok=True)
         for old in ["DoD_Full_Chain.pem", "DoW_Full_Chain.pem", "DoW_Roots.pem"]:
-            p = os.path.join(target_dir, old)
-            if os.path.isfile(p):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
+            _remove_or_restore_sentinel_cert_file(os.path.join(target_dir, old))
         dst = os.path.join(target_dir, "DoD_Roots.pem")
         roots_pem_src = os.path.join(CERTS_DIR, "DoD_Roots.pem")
         if _write_secure_cert(roots_pem_src, dst, CERTS_DIR):
@@ -694,12 +777,7 @@ def install_system_certificates(distro_family: str) -> bool:
         target_dir = "/etc/ca-certificates/trust-source/anchors"
         os.makedirs(target_dir, exist_ok=True)
         for old in ["DoD_Full_Chain.pem", "DoW_Full_Chain.pem", "DoW_Roots.pem"]:
-            p = os.path.join(target_dir, old)
-            if os.path.isfile(p):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
+            _remove_or_restore_sentinel_cert_file(os.path.join(target_dir, old))
         dst = os.path.join(target_dir, "DoD_Roots.pem")
         roots_pem_src = os.path.join(CERTS_DIR, "DoD_Roots.pem")
         if _write_secure_cert(roots_pem_src, dst, CERTS_DIR):
@@ -714,12 +792,7 @@ def install_system_certificates(distro_family: str) -> bool:
         target_dir = "/etc/pki/trust/anchors"
         os.makedirs(target_dir, exist_ok=True)
         for old in ["DoD_Full_Chain.pem", "DoW_Full_Chain.pem", "DoW_Roots.pem"]:
-            p = os.path.join(target_dir, old)
-            if os.path.isfile(p):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
+            _remove_or_restore_sentinel_cert_file(os.path.join(target_dir, old))
         dst = os.path.join(target_dir, "DoD_Roots.pem")
         roots_pem_src = os.path.join(CERTS_DIR, "DoD_Roots.pem")
         if _write_secure_cert(roots_pem_src, dst, CERTS_DIR):
@@ -753,12 +826,13 @@ def install_system_certificates(distro_family: str) -> bool:
 
 
 def merge_firefox_policy_file(target: str, module_path: str, cert_path: str) -> bool:
-    """Safely deep-merge Sentinel CAC settings into a Firefox policies.json file."""
+    """Safely deep-merge Sentinel CAC settings into a Firefox policies.json file, recording pre-existing state."""
     try:
         target_dir = os.path.dirname(target)
         os.makedirs(target_dir, exist_ok=True)
         existing_data = {}
-        if os.path.isfile(target):
+        existed_before = os.path.isfile(target)
+        if existed_before:
             try:
                 with open(target, "r", encoding="utf-8") as f_ex:
                     loaded = json.load(f_ex)
@@ -766,6 +840,23 @@ def merge_firefox_policy_file(target: str, module_path: str, cert_path: str) -> 
                         existing_data = loaded
             except Exception:
                 existing_data = {}
+
+        # Record pre-Sentinel snapshot once (O_CREAT | O_EXCL prevents overwriting initial snapshot)
+        snap_path = f"{target}.pre-sentinel-snap"
+        if not os.path.exists(snap_path) and not os.path.islink(snap_path):
+            try:
+                snap_payload = json.dumps(
+                    {
+                        "existed_before": existed_before,
+                        "prior_data": json.loads(json.dumps(existing_data)),
+                    },
+                    indent=2,
+                )
+                fd_snap = os.open(snap_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with open(fd_snap, "w", encoding="utf-8") as f_snap:
+                    f_snap.write(snap_payload)
+            except OSError:
+                pass
 
         policies = existing_data.get("policies")
         if not isinstance(policies, dict):
@@ -816,13 +907,31 @@ def merge_firefox_policy_file(target: str, module_path: str, cert_path: str) -> 
 
 
 def revert_firefox_policy_file(target: str) -> bool:
-    """Remove only Sentinel-managed keys from a Firefox policies.json file.
+    """Remove only Sentinel-managed keys from a Firefox policies.json file using pre-Sentinel ownership snapshot.
 
     Preserves all unrelated enterprise policies (Homepage, Proxy, Extensions,
-    Telemetry, third-party SecurityDevices or Certificates). Deletes the file
-    only if no policies or top-level keys remain.
+    Telemetry, third-party SecurityDevices or Certificates) AND preserves any
+    ImportEnterpriseRoots / Preferences keys that existed prior to Sentinel.
     """
+    snap_path = f"{target}.pre-sentinel-snap"
+    prior_policies = {}
+    if os.path.isfile(snap_path) and not os.path.islink(snap_path):
+        try:
+            with open(snap_path, "r", encoding="utf-8") as f_snap:
+                snap = json.load(f_snap)
+            if isinstance(snap, dict) and snap.get("existed_before"):
+                p_data = snap.get("prior_data")
+                if isinstance(p_data, dict) and isinstance(p_data.get("policies"), dict):
+                    prior_policies = p_data["policies"]
+        except Exception:
+            prior_policies = {}
+
     if not os.path.isfile(target):
+        if os.path.isfile(snap_path):
+            try:
+                os.remove(snap_path)
+            except OSError:
+                pass
         return True
 
     try:
@@ -833,15 +942,23 @@ def revert_firefox_policy_file(target: str) -> bool:
 
         policies = data.get("policies")
         if isinstance(policies, dict):
-            # 1. Clean SecurityDevices
+            prior_sec = prior_policies.get("SecurityDevices") if isinstance(prior_policies.get("SecurityDevices"), dict) else {}
+            prior_certs = prior_policies.get("Certificates") if isinstance(prior_policies.get("Certificates"), dict) else {}
+            prior_prefs = prior_policies.get("Preferences") if isinstance(prior_policies.get("Preferences"), dict) else {}
+            prior_install = prior_certs.get("Install") if isinstance(prior_certs.get("Install"), list) else []
+
+            # 1. Clean SecurityDevices (preserve if "DoD CAC" was set prior to Sentinel)
             sec_devices = policies.get("SecurityDevices")
             if isinstance(sec_devices, dict):
-                sec_devices.pop("DoD CAC", None)
+                if "DoD CAC" in prior_sec:
+                    sec_devices["DoD CAC"] = prior_sec["DoD CAC"]
+                else:
+                    sec_devices.pop("DoD CAC", None)
                 sec_devices.pop("DoW CAC", None)
-                if not sec_devices:
+                if not sec_devices and "SecurityDevices" not in prior_policies:
                     policies.pop("SecurityDevices", None)
 
-            # 2. Clean Certificates
+            # 2. Clean Certificates (preserve any Install path or ImportEnterpriseRoots that existed before Sentinel)
             certs_block = policies.get("Certificates")
             if isinstance(certs_block, dict):
                 install_list = certs_block.get("Install")
@@ -849,31 +966,42 @@ def revert_firefox_policy_file(target: str) -> bool:
                     install_list = [
                         c
                         for c in install_list
-                        if not any(
+                        if c in prior_install
+                        or not any(
                             k in str(c)
                             for k in ("DoD_Full_Chain", "DoW_Full_Chain", "DoD_Roots", "DoW_Roots", "/usr/share/sentinel/")
                         )
                     ]
                     if install_list:
                         certs_block["Install"] = install_list
-                    else:
+                    elif "Install" not in prior_certs:
                         certs_block.pop("Install", None)
 
-                if "Install" not in certs_block and certs_block.get("ImportEnterpriseRoots") is True:
+                if (
+                    "Install" not in certs_block
+                    and certs_block.get("ImportEnterpriseRoots") is True
+                    and "ImportEnterpriseRoots" not in prior_certs
+                ):
                     if len(certs_block) == 1:
                         certs_block.pop("ImportEnterpriseRoots", None)
 
-                if not certs_block:
+                if not certs_block and "Certificates" not in prior_policies:
                     policies.pop("Certificates", None)
 
-            # 3. Clean Preferences added by Sentinel
+            # 3. Clean Preferences added by Sentinel (restore/preserve if present in prior_prefs)
             prefs = policies.get("Preferences")
             if isinstance(prefs, dict):
-                if prefs.get("security.default_personal_cert") == "Ask Every Time":
+                if "security.default_personal_cert" in prior_prefs:
+                    prefs["security.default_personal_cert"] = prior_prefs["security.default_personal_cert"]
+                elif prefs.get("security.default_personal_cert") == "Ask Every Time":
                     prefs.pop("security.default_personal_cert", None)
-                if prefs.get("security.enterprise_roots.enabled") is True:
+
+                if "security.enterprise_roots.enabled" in prior_prefs:
+                    prefs["security.enterprise_roots.enabled"] = prior_prefs["security.enterprise_roots.enabled"]
+                elif prefs.get("security.enterprise_roots.enabled") is True:
                     prefs.pop("security.enterprise_roots.enabled", None)
-                if not prefs:
+
+                if not prefs and "Preferences" not in prior_policies:
                     policies.pop("Preferences", None)
 
         # Only delete the file if policies is completely empty AND no other top-level keys exist
@@ -890,6 +1018,12 @@ def revert_firefox_policy_file(target: str) -> bool:
             os.chmod(tmp_name, 0o644)
             os.replace(tmp_name, target)
             log(f"Cleaned Sentinel entries while preserving existing enterprise policies in {target}")
+
+        if os.path.isfile(snap_path):
+            try:
+                os.remove(snap_path)
+            except OSError:
+                pass
         return True
     except Exception as e:
         log(f"Note reverting policy {target}: {e}")
@@ -1048,6 +1182,51 @@ def install_system_packages(distro_family: str) -> bool:
     return pkg_ok
 
 
+def cleanup_legacy_smartcard_logon(distro_family: str) -> bool:
+    """Cleanly roll back any legacy v2.0.0 PAM/SSSD workstation logon configuration."""
+    ok = True
+    legacy_sssd_dropin = "/etc/sssd/conf.d/sentinel-smartcard.conf"
+    if os.path.isfile(legacy_sssd_dropin):
+        try:
+            os.remove(legacy_sssd_dropin)
+            log(f"Removed legacy {legacy_sssd_dropin}")
+        except OSError:
+            ok = False
+
+    sssd_ca_db = "/etc/sssd/pki/sssd_auth_ca_db.pem"
+    if os.path.isfile(sssd_ca_db):
+        try:
+            with open(sssd_ca_db, "rb") as f_db:
+                raw = f_db.read(5 * 1024 * 1024)
+            sha = hashlib.sha256(raw).hexdigest().lower()
+            if sha in (DOD_CA_FINGERPRINTS.get("DoD_Roots.pem"), DOD_CA_FINGERPRINTS.get("DoD_Full_Chain.pem")):
+                os.remove(sssd_ca_db)
+                log(f"Removed Sentinel-installed {sssd_ca_db}")
+        except OSError:
+            pass
+
+    if distro_family == "fedora" and shutil.which("authselect"):
+        if os.path.isdir("/var/lib/authselect/backups/sentinel_backup"):
+            res = subprocess.run(
+                ["authselect", "backup-restore", "sentinel_backup"],
+                capture_output=True,
+                text=True,
+            )
+            if res.returncode == 0:
+                log("Restored pre-Sentinel authselect profile from sentinel_backup")
+            else:
+                ok = False
+    elif distro_family == "debian" and shutil.which("pam-auth-update"):
+        if os.path.isfile("/usr/share/pam-configs/sss-smart-card-optional"):
+            subprocess.run(
+                ["pam-auth-update", "--package", "--remove", "sss-smart-card-optional"],
+                capture_output=True,
+                text=True,
+            )
+
+    return ok
+
+
 def uninstall_system_configuration(distro_family: str) -> bool:
     """Revert Sentinel system configuration, remove Sentinel-installed DoD CAs, and restore policies."""
     log("Reverting Sentinel CAC Manager system configuration and removing trust...")
@@ -1066,12 +1245,8 @@ def uninstall_system_configuration(distro_family: str) -> bool:
     elif distro_family == "fedora":
         for old in ["DoD_Roots.pem", "DoD_Full_Chain.pem", "DoW_Roots.pem", "DoW_Full_Chain.pem"]:
             p = os.path.join("/etc/pki/ca-trust/source/anchors", old)
-            if os.path.isfile(p):
-                try:
-                    os.remove(p)
-                    log(f"Removed {p}")
-                except OSError:
-                    pass
+            if _remove_or_restore_sentinel_cert_file(p):
+                log(f"Removed {p}")
         res = subprocess.run(["update-ca-trust"], capture_output=True, text=True)
         log("Rebuilt system CA trust store with update-ca-trust.")
         if res.returncode != 0:
@@ -1079,12 +1254,8 @@ def uninstall_system_configuration(distro_family: str) -> bool:
     elif distro_family == "arch":
         for old in ["DoD_Roots.pem", "DoD_Full_Chain.pem", "DoW_Roots.pem", "DoW_Full_Chain.pem"]:
             p = os.path.join("/etc/ca-certificates/trust-source/anchors", old)
-            if os.path.isfile(p):
-                try:
-                    os.remove(p)
-                    log(f"Removed {p}")
-                except OSError:
-                    pass
+            if _remove_or_restore_sentinel_cert_file(p):
+                log(f"Removed {p}")
         res = subprocess.run(["trust", "extract-compat"], capture_output=True, text=True)
         log("Rebuilt system CA trust store with trust extract-compat.")
         if res.returncode != 0:
@@ -1092,26 +1263,27 @@ def uninstall_system_configuration(distro_family: str) -> bool:
     elif distro_family == "suse":
         for old in ["DoD_Roots.pem", "DoD_Full_Chain.pem", "DoW_Roots.pem", "DoW_Full_Chain.pem"]:
             p = os.path.join("/etc/pki/trust/anchors", old)
-            if os.path.isfile(p):
-                try:
-                    os.remove(p)
-                    log(f"Removed {p}")
-                except OSError:
-                    pass
+            if _remove_or_restore_sentinel_cert_file(p):
+                log(f"Removed {p}")
         res = subprocess.run(["update-ca-certificates"], capture_output=True, text=True)
         log("Rebuilt system CA trust store with update-ca-certificates.")
         if res.returncode != 0:
             all_ok = False
 
-    # Remove application certificates copy in /usr/share/sentinel
-    if os.path.isdir("/usr/share/sentinel/certificates"):
-        shutil.rmtree("/usr/share/sentinel/certificates", ignore_errors=True)
-        log("Removed /usr/share/sentinel/certificates")
-        if os.path.isdir("/usr/share/sentinel") and not os.listdir("/usr/share/sentinel"):
-            try:
-                os.rmdir("/usr/share/sentinel")
-            except OSError:
-                pass
+    # Remove ONLY manifest-verified certificate files in /usr/share/sentinel/certificates (never rmtree)
+    for sub in [
+        "/usr/share/sentinel/certificates/roots",
+        "/usr/share/sentinel/certificates/intermediates",
+        "/usr/share/sentinel/certificates/all_cas",
+        "/usr/share/sentinel/certificates",
+    ]:
+        if os.path.isdir(sub):
+            _clean_sentinel_owned_certs_in_dir(sub, keep_roots=False)
+    if os.path.isdir("/usr/share/sentinel") and not os.listdir("/usr/share/sentinel"):
+        try:
+            os.rmdir("/usr/share/sentinel")
+        except OSError:
+            pass
 
     # 2. Revert Firefox enterprise policies non-destructively
     policy_targets = [
@@ -1147,14 +1319,8 @@ def uninstall_system_configuration(distro_family: str) -> bool:
             except Exception as e:
                 log(f"Note restoring OpenSC config: {e}")
 
-    # 5. Clean up any legacy SSSD drop-in if present from an earlier version
-    legacy_sssd_dropin = "/etc/sssd/conf.d/sentinel-smartcard.conf"
-    if os.path.isfile(legacy_sssd_dropin):
-        try:
-            os.remove(legacy_sssd_dropin)
-            log(f"Removed legacy {legacy_sssd_dropin}")
-        except OSError:
-            pass
+    # 5. Clean up any legacy SSSD/PAM smart card logon state from earlier versions
+    cleanup_legacy_smartcard_logon(distro_family)
 
     # 6. Remove Polkit policy and helper from /usr/libexec/sentinel
     polkit_policy = "/usr/share/polkit-1/actions/com.codefxr.sentinel.policy"
@@ -1190,6 +1356,7 @@ def main():
     parser.add_argument("--service", action="store_true", help="enable pcscd only")
     parser.add_argument("--reader-fix", action="store_true", help="fix opensc.conf only")
     parser.add_argument("--policies", action="store_true", help="install policies only")
+    parser.add_argument("--disable-logon", action="store_true", help="roll back legacy v2.0.0 PAM/SSSD logon")
     parser.add_argument("--sync-helper", action="store_true", help="install/sync helper into /usr/libexec/sentinel")
     parser.add_argument("--uninstall", action="store_true", help="revert system changes and remove DoD trust")
 
@@ -1201,6 +1368,10 @@ def main():
 
     if args.uninstall:
         ok = uninstall_system_configuration(args.family)
+        return 0 if ok else 1
+
+    if args.disable_logon:
+        ok = cleanup_legacy_smartcard_logon(args.family)
         return 0 if ok else 1
 
     global CERTS_DIR, ALL_CAS_DIR, FULL_CHAIN_PEM, FULL_CHAIN_CRT
@@ -1222,11 +1393,13 @@ def main():
     if args.packages or args.all:
         pkgs_ok = install_system_packages(args.family)
 
+    svc_ok = True
     if args.all or args.service:
-        enable_pcscd()
+        svc_ok = enable_pcscd()
 
+    reader_ok = True
     if args.all or args.reader_fix:
-        fix_opensc_hang()
+        reader_ok = fix_opensc_hang()
 
     certs_ok = True
     if args.all or args.certs:
@@ -1248,6 +1421,14 @@ def main():
     if not pkgs_ok:
         log("ERROR: System middleware package installation failed.")
         return 4
+
+    if not svc_ok:
+        log("ERROR: pcscd service or socket activation failed.")
+        return 5
+
+    if not reader_ok:
+        log("ERROR: OpenSC configuration optimization failed.")
+        return 6
 
     if not certs_ok:
         log("ERROR: Certificate installation into system trust store encountered errors.")

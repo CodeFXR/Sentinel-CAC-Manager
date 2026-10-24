@@ -100,8 +100,12 @@ def uninstall_systemd_user_service(
             _log(f"Removed {service_file}")
         except OSError as e:
             _log(f"[-] Could not remove {service_file}: {e}")
+            return False, f"Could not remove {service_file}: {e}"
 
-    if systemctl:
+    if service_file.exists():
+        return False, f"Service file {service_file} still exists after removal attempt."
+
+    if systemctl and home_dir is None:
         try:
             subprocess.run([systemctl, "--user", "daemon-reload"], capture_output=True)
         except Exception:

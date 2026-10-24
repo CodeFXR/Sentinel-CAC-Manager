@@ -380,7 +380,9 @@ class PinBuffer:
     """Memory-hardened buffer for sensitive credentials (PINs/PUKs).
 
     Delegates to native Rust PinBuffer with ZeroizeOnDrop if available,
-    or transparently falls back to _PyPinBuffer.
+    or transparently falls back to _PyPinBuffer. Note that while native
+    Rust APDU buffers and PinBuffer storage are zeroized deterministically,
+    caller-supplied Python str objects remain managed by CPython's allocator.
     """
 
     def __new__(cls, pin: str):

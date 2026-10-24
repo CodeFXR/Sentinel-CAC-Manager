@@ -10,7 +10,7 @@
   <p>
     <img src="https://img.shields.io/badge/Made%20with-GTK4%20%2F%20Libadwaita-00ADD8?style=flat-square" alt="GTK4 Libadwaita" />
     <img src="https://img.shields.io/badge/Language-Python%20%26%20Rust-00ADD8?style=flat-square" alt="Python & Rust" />
-    <img src="https://img.shields.io/badge/Version-v2.0.1-blue?style=flat-square" alt="Version" />
+    <img src="https://img.shields.io/badge/Version-v2.0.2-blue?style=flat-square" alt="Version" />
     <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License" />
   </p>
 
@@ -53,18 +53,20 @@ Configuring a Common Access Card on Linux usually requires orchestrating PC/SC d
 
 ### Option 1: Release Archive (Recommended)
 
-Download the pre-packaged offline release archive from [GitHub Releases](https://github.com/CodeFXR/Sentinel-CAC-Manager/releases):
+Download the pre-packaged offline release archive (`Sentinel-CAC-Manager.tar.gz`) and its SHA-256 checksum from [GitHub Releases](https://github.com/CodeFXR/Sentinel-CAC-Manager/releases):
 
 ```bash
-tar -xzf Sentinel-CAC-Manager-v2.0.1.tar.gz
-cd Sentinel-CAC-Manager-v2.0.1
+# Verify the archive SHA-256 against the digest published on the release page
+echo "<PUBLISHED_SHA256>  Sentinel-CAC-Manager.tar.gz" | sha256sum -c -
+tar -xzf Sentinel-CAC-Manager.tar.gz
+cd Sentinel-CAC-Manager
 ./install
 ```
 
 ### Option 2: Clone from Repository
 
 ```bash
-git clone --branch v2.0.1 https://github.com/CodeFXR/Sentinel-CAC-Manager.git
+git clone --branch v2.0.2 https://github.com/CodeFXR/Sentinel-CAC-Manager.git
 cd Sentinel-CAC-Manager
 ./install
 ```
@@ -94,7 +96,7 @@ Sentinel CAC Manager provides both a Libadwaita desktop application and an unatt
 | `sentinel --setup-all` | Run complete automated configuration (services, CAs, browsers) |
 | `sentinel --card-info` | Display details, EDIPI, holder name, and validity of inserted CAC |
 | `sentinel --pin-status` | Display PIV PIN verification retry counter and lock state |
-| `sentinel --change-pin` | Interactively change PIV smart card PIN with zeroized buffers |
+| `sentinel --change-pin` | Interactively change PIV smart card PIN (zeroizes native Rust APDU buffers) |
 | `sentinel --lock-on-removal` | Enable automatic desktop screen lock when card is removed |
 | `sentinel --no-lock-on-removal` | Disable automatic desktop screen lock on card removal |
 | `sentinel --agent` | Run background event daemon for desktop insert/removal notifications |
@@ -103,8 +105,7 @@ Sentinel CAC Manager provides both a Libadwaita desktop application and an unatt
 | `sentinel --certs` | Install verified DoD Root CAs into operating system trust only |
 | `sentinel --reader-fix` | Apply OpenSC Broadcom reader driver hang fix |
 | `sentinel --check-update` | Check GitHub Releases for a newer SHA-256 verified version |
-| `sentinel --update` | Update Sentinel to the latest verified release tag or archive |
-| `sentinel --uninstall` | Revert all system changes, restore policies, and remove trust |
+| `sentinel --uninstall` | Revert Sentinel-managed trust anchors, policies, and browser modules |
 
 ### Desktop Interface
 
@@ -130,8 +131,8 @@ Launch Sentinel from your application menu or run `sentinel`. The interface prov
 
 | Limitation | Status | Details |
 |---|---|---|
-| On-Card PIN Change | PIV Applet Only | Uses NIST SP 800-73-4 `CHANGE REFERENCE DATA` APDUs; refuses automated PIN change when only 1 retry remains to prevent card lockout. |
-| OCSP Revocation Check | Network Dependent | Verifies responder signature, `id-kp-OCSPSigning` EKU, CertID hashes, and freshness window; some DoD OCSP responders require NIPRNet/VPN access. |
+| On-Card PIN Change | PIV Applet Only | Uses NIST SP 800-73-4 `CHANGE REFERENCE DATA` APDUs in an exclusive PC/SC transaction; zeroizes native Rust APDU buffers (caller Python `str` objects remain managed by CPython); requires confirmation at 2 retries and blocks at 1 retry. |
+| OCSP Revocation Check | Network Dependent | Verifies leaf signature against DoD CA, `.mil` OCSP host, responder signature, `id-kp-OCSPSigning` EKU, CertID hashes, and freshness window; some DoD OCSP responders require NIPRNet/VPN access. |
 | Firefox Enterprise Policy | Installs Chain Bundle | Sets `ImportEnterpriseRoots: true` and loads `DoD_Full_Chain.pem` into Firefox so `.mil` servers omitting intermediate CAs still chain to DoD Roots. |
 | Distribution Validation | Hardware Tested on Fedora & Ubuntu | Arch Linux and openSUSE are supported via platform abstraction but have not been tested with physical CAC hardware in a VM. |
 | Workstation Login (PAM/SSSD) | Experimental / Archived | Hardened PAM/SSSD logon logic is archived in `archive/future_workstation_logon.py` pending multi-distro VM validation. |

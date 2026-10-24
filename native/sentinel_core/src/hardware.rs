@@ -880,6 +880,32 @@ pub fn query_piv_pin_status(reader_opt: Option<&str>) -> (bool, u8, String) {
     }
 }
 
+/// Evaluates the status words (SW1, SW2) from an empty VERIFY APDU (00 20 00 80)
+/// before transmitting CHANGE REFERENCE DATA. Fails closed on any locked, 1-retry,
+/// or unrecognized status word.
+pub fn evaluate_precheck_verify_sw(sw1: u8, sw2: u8) -> Result<u8, (u8, String)> {
+    if (sw1 == 0x69 && sw2 == 0x83) || (sw1 == 0x63 && (sw2 & 0xF0) == 0xC0 && (sw2 & 0x0F) == 0) {
+        return Err((0, "PIN is locked (0 attempts remaining); PUK unblock required".to_string()));
+    }
+    if sw1 == 0x63 && (sw2 & 0xF0) == 0xC0 {
+        let retries = sw2 & 0x0F;
+        if retries == 1 {
+            return Err((
+                1,
+                "Only 1 PIN retry attempt remains; refusing automated PIN change to prevent card lockout".to_string(),
+            ));
+        }
+        return Ok(retries);
+    }
+    if sw1 == 0x90 && sw2 == 0x00 {
+        return Ok(255);
+    }
+    Err((
+        0,
+        format!("Security abort: Unexpected status {sw1:02X} {sw2:02X} from pre-check VERIFY APDU"),
+    ))
+}
+
 /// Changes the PIV Cardholder PIN on the smart card via CHANGE REFERENCE DATA (00 24 00 80).
 ///
 /// Parameters:
@@ -994,15 +1020,26 @@ pub fn change_piv_pin_native(
     } else {
         false
     };
+    if !in_tx {
+        old_buf.zeroize();
+        new_buf.zeroize();
+        unsafe {
+            disconnect_fn(h_card, SCARD_LEAVE_CARD);
+            (symbols.release_context)(context);
+        }
+        return (
+            false,
+            0,
+            "Security abort: Could not acquire exclusive PC/SC transaction for PIN change".to_string(),
+        );
+    }
 
     if !select_piv_applet(transmit_fn, h_card, active_proto) {
         old_buf.zeroize();
         new_buf.zeroize();
         unsafe {
-            if in_tx {
-                if let Some(end_fn) = symbols.end_transaction {
-                    let _ = end_fn(h_card, SCARD_LEAVE_CARD);
-                }
+            if let Some(end_fn) = symbols.end_transaction {
+                let _ = end_fn(h_card, SCARD_LEAVE_CARD);
             }
             disconnect_fn(h_card, SCARD_LEAVE_CARD);
             (symbols.release_context)(context);
@@ -1014,44 +1051,40 @@ pub fn change_piv_pin_native(
         );
     }
 
-    // Verify retry counter inside the transaction before attempting CHANGE REFERENCE DATA
+    // Fail-closed: verify retry counter inside the transaction before attempting CHANGE REFERENCE DATA
     let verify_empty = [0x00, 0x20, 0x00, 0x80];
-    if let Ok(v_resp) = transmit_apdu(transmit_fn, h_card, active_proto, &verify_empty) {
-        if v_resp.len() >= 2 {
+    match transmit_apdu(transmit_fn, h_card, active_proto, &verify_empty) {
+        Ok(v_resp) if v_resp.len() >= 2 => {
             let v_sw1 = v_resp[v_resp.len() - 2];
             let v_sw2 = v_resp[v_resp.len() - 1];
-            if (v_sw1 == 0x69 && v_sw2 == 0x83) || (v_sw1 == 0x63 && (v_sw2 & 0xF0) == 0xC0 && (v_sw2 & 0x0F) == 0) {
+            if let Err((retries, err_msg)) = evaluate_precheck_verify_sw(v_sw1, v_sw2) {
                 old_buf.zeroize();
                 new_buf.zeroize();
                 unsafe {
-                    if in_tx {
-                        if let Some(end_fn) = symbols.end_transaction {
-                            let _ = end_fn(h_card, SCARD_LEAVE_CARD);
-                        }
+                    if let Some(end_fn) = symbols.end_transaction {
+                        let _ = end_fn(h_card, SCARD_LEAVE_CARD);
                     }
                     disconnect_fn(h_card, SCARD_LEAVE_CARD);
                     (symbols.release_context)(context);
                 }
-                return (false, 0, "PIN is locked (0 attempts remaining); PUK unblock required".to_string());
+                return (false, retries, err_msg);
             }
-            if v_sw1 == 0x63 && (v_sw2 & 0xF0) == 0xC0 && (v_sw2 & 0x0F) == 1 {
-                old_buf.zeroize();
-                new_buf.zeroize();
-                unsafe {
-                    if in_tx {
-                        if let Some(end_fn) = symbols.end_transaction {
-                            let _ = end_fn(h_card, SCARD_LEAVE_CARD);
-                        }
-                    }
-                    disconnect_fn(h_card, SCARD_LEAVE_CARD);
-                    (symbols.release_context)(context);
+        }
+        _ => {
+            old_buf.zeroize();
+            new_buf.zeroize();
+            unsafe {
+                if let Some(end_fn) = symbols.end_transaction {
+                    let _ = end_fn(h_card, SCARD_LEAVE_CARD);
                 }
-                return (
-                    false,
-                    1,
-                    "Only 1 PIN retry attempt remains; refusing automated PIN change to prevent card lockout".to_string(),
-                );
+                disconnect_fn(h_card, SCARD_LEAVE_CARD);
+                (symbols.release_context)(context);
             }
+            return (
+                false,
+                0,
+                "Security abort: Pre-check VERIFY APDU failed; refusing to transmit CHANGE REFERENCE DATA".to_string(),
+            );
         }
     }
 
@@ -1247,6 +1280,17 @@ mod tests {
         let (ok, _, msg) = change_piv_pin_native(None, "123456", "123456");
         assert!(!ok);
         assert!(msg.contains("different"));
+    }
+
+    #[test]
+    fn test_evaluate_precheck_verify_sw_fail_closed() {
+        assert_eq!(evaluate_precheck_verify_sw(0x63, 0xC3), Ok(3));
+        assert_eq!(evaluate_precheck_verify_sw(0x63, 0xC2), Ok(2));
+        assert_eq!(evaluate_precheck_verify_sw(0x90, 0x00), Ok(255));
+        assert!(evaluate_precheck_verify_sw(0x63, 0xC1).is_err());
+        assert!(evaluate_precheck_verify_sw(0x63, 0xC0).is_err());
+        assert!(evaluate_precheck_verify_sw(0x69, 0x83).is_err());
+        assert!(evaluate_precheck_verify_sw(0x6A, 0x82).is_err());
     }
 
     #[test]

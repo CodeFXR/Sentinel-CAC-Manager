@@ -58,3 +58,20 @@ jobs:
 
       - name: Run Python unit tests with compiled Rust native accelerator
         run: python3 -m unittest discover -v
+
+      - name: Privileged Helper Install & Rollback Canary Verification (Ubuntu)
+        run: |
+          sudo mkdir -p /usr/local/share/ca-certificates/dod /usr/share/sentinel /etc/firefox/policies
+          echo "ADMIN_CANARY_CERT" | sudo tee /usr/local/share/ca-certificates/dod/DoD_Root_CA_3.crt >/dev/null
+          echo "ADMIN_UNRELATED_CERT" | sudo tee /usr/local/share/ca-certificates/dod/Corp_Root_CA.crt >/dev/null
+          echo "ADMIN_CUSTOM_NOTE" | sudo tee /usr/share/sentinel/admin_custom.txt >/dev/null
+          echo '{"policies":{"Certificates":{"ImportEnterpriseRoots":true,"Install":["/etc/corp/root.pem"]}}}' | sudo tee /etc/firefox/policies/policies.json >/dev/null
+
+          sudo python3 core/privileged_helper.py --certs --family debian --certs-dir "$PWD/certificates"
+          sudo python3 -c "from core.privileged_helper import merge_firefox_policy_file; assert merge_firefox_policy_file('/etc/firefox/policies/policies.json', '/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so', '/usr/share/sentinel/certificates/DoD_Full_Chain.pem')"
+          sudo python3 core/privileged_helper.py --uninstall --family debian
+
+          grep -q "ADMIN_CANARY_CERT" /usr/local/share/ca-certificates/dod/DoD_Root_CA_3.crt
+          grep -q "ADMIN_UNRELATED_CERT" /usr/local/share/ca-certificates/dod/Corp_Root_CA.crt
+          grep -q "ADMIN_CUSTOM_NOTE" /usr/share/sentinel/admin_custom.txt
+          grep -q "/etc/corp/root.pem" /etc/firefox/policies/policies.json

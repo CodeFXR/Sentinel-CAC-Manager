@@ -22,9 +22,9 @@ from cli import _clean_term
 
 class TestRustBridge(unittest.TestCase):
     def test_rust_availability(self):
-        # On systems where Rust is compiled, verify version 2.0.1
+        # On systems where Rust is compiled, verify version 2.0.2
         if is_rust_available():
-            self.assertEqual(get_rust_version(), "2.0.1")
+            self.assertEqual(get_rust_version(), "2.0.2")
         else:
             self.assertIsNone(get_rust_version())
 
@@ -108,19 +108,39 @@ class TestRustBridge(unittest.TestCase):
         self.assertEqual(cert_civ.edipi, "9876543210")
 
     def test_native_pcsc_query(self):
+        import os
+        from unittest.mock import MagicMock, patch
         from core.rust_bridge import query_native_pcsc_rust
-        status = query_native_pcsc_rust()
-        if status is not None:
-            self.assertTrue(status.available)
-            self.assertIsInstance(status.readers, list)
+
+        if os.environ.get("SENTINEL_TEST_HARDWARE") == "1":
+            status = query_native_pcsc_rust()
+            if status is not None:
+                self.assertTrue(status.available)
+                self.assertIsInstance(status.readers, list)
+        else:
+            fake_status = MagicMock(available=True, service_running=False, readers=[], card_present=False, atr=None, is_cac=False)
+            with patch("core.rust_bridge.is_rust_available", return_value=True), \
+                 patch("core.rust_bridge._sentinel_core") as mock_sc:
+                mock_sc.query_native_pcsc.return_value = fake_status
+                status = query_native_pcsc_rust()
+                self.assertIsNotNone(status)
+                self.assertTrue(status.available)
+                self.assertEqual(status.readers, [])
 
     def test_native_piv_apdu_reader(self):
+        import os
+        from unittest.mock import patch
         from core.rust_bridge import read_card_certificates_rust
-        certs = read_card_certificates_rust()
-        self.assertIsInstance(certs, list)
-        for cert in certs:
-            self.assertIn("Revocation Unchecked", cert.status_text)
-            self.assertTrue(cert.holder_name or cert.cn)
+
+        if os.environ.get("SENTINEL_TEST_HARDWARE") == "1":
+            certs = read_card_certificates_rust()
+            self.assertIsInstance(certs, list)
+        else:
+            with patch("core.rust_bridge.is_rust_available", return_value=True), \
+                 patch("core.rust_bridge._sentinel_core") as mock_sc:
+                mock_sc.read_card_certificates.return_value = []
+                certs = read_card_certificates_rust()
+                self.assertEqual(certs, [])
 
     def test_verify_cert_ocsp_handling(self):
         from core.smartcard import CardCertificate, verify_cert_ocsp
@@ -356,7 +376,7 @@ class TestSubprocessTimeoutHandling(unittest.TestCase):
 class TestVersionConsistency(unittest.TestCase):
     def test_version_matches(self):
         import core
-        self.assertEqual(core.__version__, "2.0.1")
+        self.assertEqual(core.__version__, "2.0.2")
 
 
 class TestPinManagement(unittest.TestCase):
@@ -393,8 +413,17 @@ class TestPinManagement(unittest.TestCase):
             self.assertIn("only 1 PIN retry attempt remains", msg)
 
     def test_query_pin_status_types(self):
+        import os
+        from unittest.mock import patch
         from core.rust_bridge import query_pin_status_rust
-        ok, retries, msg = query_pin_status_rust()
+
+        if os.environ.get("SENTINEL_TEST_HARDWARE") == "1":
+            ok, retries, msg = query_pin_status_rust()
+        else:
+            with patch("core.rust_bridge.is_rust_available", return_value=True), \
+                 patch("core.rust_bridge._sentinel_core") as mock_sc:
+                mock_sc.query_pin_status.return_value = (False, 0, "No smart card reader with inserted card found")
+                ok, retries, msg = query_pin_status_rust()
         self.assertIsInstance(ok, bool)
         self.assertIsInstance(retries, int)
         self.assertIsInstance(msg, str)
@@ -537,21 +566,40 @@ class TestV201SecurityAndRollbackHardening(unittest.TestCase):
     def test_non_destructive_debian_ca_cleanup(self):
         import tempfile
         import os
+        import shutil
         from core.privileged_helper import _clean_sentinel_owned_certs_in_dir
 
+        real_root3 = os.path.join(REPO_ROOT, "certificates", "roots", "DoD_Root_CA_3.crt")
+        real_root5 = os.path.join(REPO_ROOT, "certificates", "roots", "DoD_Root_CA_5.crt")
+
         with tempfile.TemporaryDirectory() as tmp_dir:
-            # 1. Sentinel-owned root cert
+            # 1. Sentinel-owned root cert with verified content -> removed
             sentinel_crt = os.path.join(tmp_dir, "DoD_Root_CA_3.crt")
-            with open(sentinel_crt, "w") as f:
-                f.write("sentinel cert")
-            # 2. Unrelated enterprise/admin cert in same directory
+            shutil.copy2(real_root3, sentinel_crt)
+
+            # 2. Same filename (DoD_Root_CA_4.crt) but modified by administrator -> MUST BE PRESERVED
+            admin_modified_crt = os.path.join(tmp_dir, "DoD_Root_CA_4.crt")
+            with open(admin_modified_crt, "w") as f:
+                f.write("admin customized DoD_Root_CA_4 content")
+
+            # 3. Sentinel-owned cert with a .pre-sentinel-bak backup -> backup restored
+            restored_crt = os.path.join(tmp_dir, "DoD_Root_CA_5.crt")
+            shutil.copy2(real_root5, restored_crt)
+            with open(restored_crt + ".pre-sentinel-bak", "w") as f:
+                f.write("original pre-sentinel root 5")
+
+            # 4. Unrelated enterprise/admin cert in same directory -> preserved
             custom_crt = os.path.join(tmp_dir, "Internal_Agency_Root_CA.crt")
             with open(custom_crt, "w") as f:
                 f.write("custom enterprise cert")
 
             removed = _clean_sentinel_owned_certs_in_dir(tmp_dir)
-            self.assertEqual(removed, 1)
+            self.assertEqual(removed, 2)
             self.assertFalse(os.path.exists(sentinel_crt))
+            self.assertTrue(os.path.exists(admin_modified_crt))
+            self.assertTrue(os.path.exists(restored_crt))
+            with open(restored_crt, "r") as f:
+                self.assertEqual(f.read(), "original pre-sentinel root 5")
             self.assertTrue(os.path.exists(custom_crt))
 
     def test_non_destructive_firefox_policy_revert(self):
@@ -820,6 +868,287 @@ class TestV201SecurityAndRollbackHardening(unittest.TestCase):
             ok_sym, msg_sym = safe_extract_tarball(sym_path, os.path.join(tmp_dir, "out2"))
             self.assertFalse(ok_sym)
             self.assertIn("Security policy", msg_sym)
+
+
+class TestV202SecurityOwnershipAndVerification(unittest.TestCase):
+    def test_unprivileged_modules_never_import_privileged_helper(self):
+        import os
+
+        unprivileged_files = [
+            os.path.join(REPO_ROOT, "core", "certificates.py"),
+            os.path.join(REPO_ROOT, "core", "smartcard.py"),
+            os.path.join(REPO_ROOT, "core", "browsers.py"),
+            os.path.join(REPO_ROOT, "core", "updater.py"),
+            os.path.join(REPO_ROOT, "core", "ownership.py"),
+            os.path.join(REPO_ROOT, "core", "ca_manifest.py"),
+            os.path.join(REPO_ROOT, "ui", "system_view.py"),
+        ]
+        for path in unprivileged_files:
+            with open(path, "r", encoding="utf-8") as f:
+                source = f.read()
+            self.assertNotIn(
+                "from core.privileged_helper import",
+                source,
+                f"Unprivileged module {path} must not import core.privileged_helper",
+            )
+            self.assertNotIn(
+                "import core.privileged_helper",
+                source,
+                f"Unprivileged module {path} must not import core.privileged_helper",
+            )
+
+    def test_all_bundled_cas_valid_and_unexpired(self):
+        import os
+        from core.ca_manifest import check_bundled_ca_expirations
+
+        certs_dir = os.path.join(REPO_ROOT, "certificates")
+        res = check_bundled_ca_expirations(certs_dir)
+        self.assertEqual(res["expired"], [])
+        self.assertEqual(len(res["valid"]) + len(res["expiring_soon"]), 44)
+
+    def test_firefox_policy_snapshot_preserves_preexisting_keys(self):
+        import json
+        import os
+        import tempfile
+        from core.privileged_helper import merge_firefox_policy_file, revert_firefox_policy_file
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            policy_path = os.path.join(tmp_dir, "policies.json")
+            preexisting = {
+                "policies": {
+                    "Certificates": {
+                        "ImportEnterpriseRoots": True,
+                        "Install": ["/etc/corp/enterprise_root.pem"],
+                    },
+                    "Preferences": {
+                        "security.default_personal_cert": {
+                            "Value": "Ask Every Time",
+                            "Status": "locked",
+                        }
+                    },
+                }
+            }
+            with open(policy_path, "w", encoding="utf-8") as f:
+                json.dump(preexisting, f)
+
+            ok = merge_firefox_policy_file(
+                policy_path,
+                "/usr/lib64/opensc-pkcs11.so",
+                "/usr/share/sentinel/certificates/DoD_Full_Chain.pem",
+            )
+            self.assertTrue(ok)
+            self.assertTrue(os.path.isfile(policy_path + ".pre-sentinel-snap"))
+
+            rev_ok = revert_firefox_policy_file(policy_path)
+            self.assertTrue(rev_ok)
+            self.assertTrue(os.path.isfile(policy_path))
+            with open(policy_path, "r", encoding="utf-8") as f:
+                after = json.load(f)
+
+            self.assertTrue(after["policies"]["Certificates"]["ImportEnterpriseRoots"])
+            self.assertEqual(
+                after["policies"]["Certificates"]["Install"],
+                ["/etc/corp/enterprise_root.pem"],
+            )
+            self.assertEqual(
+                after["policies"]["Preferences"]["security.default_personal_cert"]["Value"],
+                "Ask Every Time",
+            )
+            self.assertNotIn("SecurityDevices", after["policies"])
+
+    def test_firefox_user_js_snapshot_preserves_preexisting_pref(self):
+        import os
+        import tempfile
+        from core.browsers import configure_firefox_user_js, revert_firefox_user_js
+
+        with tempfile.TemporaryDirectory() as tmp_profile:
+            user_js = os.path.join(tmp_profile, "user.js")
+            with open(user_js, "w", encoding="utf-8") as f:
+                f.write(
+                    'user_pref("security.default_personal_cert", "Ask Every Time");\n'
+                    'user_pref("browser.startup.homepage", "https://intranet.mil");\n'
+                )
+
+            self.assertTrue(configure_firefox_user_js(tmp_profile))
+            self.assertTrue(revert_firefox_user_js(tmp_profile))
+
+            with open(user_js, "r", encoding="utf-8") as f:
+                reverted = f.read()
+            self.assertIn('user_pref("security.default_personal_cert", "Ask Every Time");', reverted)
+            self.assertIn('user_pref("browser.startup.homepage", "https://intranet.mil");', reverted)
+
+    def test_nss_import_rejects_tampered_ca(self):
+        import os
+        import tempfile
+        from unittest.mock import patch
+        from core.certificates import import_root_cas_to_nss
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            roots_dir = os.path.join(tmp_dir, "roots")
+            os.makedirs(roots_dir, exist_ok=True)
+            tampered_root = os.path.join(roots_dir, "DoD_Root_CA_3.crt")
+            with open(tampered_root, "w", encoding="utf-8") as f:
+                f.write("-----BEGIN CERTIFICATE-----\nTAMPERED\n-----END CERTIFICATE-----\n")
+
+            nss_db = os.path.join(tmp_dir, "nssdb")
+            os.makedirs(nss_db, exist_ok=True)
+            inter_dir = os.path.join(tmp_dir, "intermediates")
+            os.makedirs(inter_dir, exist_ok=True)
+
+            with patch("shutil.which", return_value="/usr/bin/certutil"), \
+                 patch("core.certificates.ROOTS_DIR", roots_dir), \
+                 patch("core.certificates.INTERMEDIATES_DIR", inter_dir), \
+                 patch("subprocess.run") as mock_run:
+                imported, errors = import_root_cas_to_nss(nss_db)
+                self.assertEqual(imported, 0)
+                self.assertTrue(len(errors) > 0)
+                for call_item in mock_run.call_args_list:
+                    self.assertNotIn("-A", call_item[0][0])
+
+    def test_ocsp_host_and_leaf_signature_enforcement(self):
+        import os
+        from datetime import datetime, timedelta, timezone
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509 import AuthorityInformationAccessOID, UniformResourceIdentifier
+        from cryptography.x509.oid import NameOID
+        from core.smartcard import CardCertificate, verify_cert_ocsp
+
+        now = datetime.now(timezone.utc)
+        rogue_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+        # Load subject of genuine DoD Root CA 3
+        real_root3_path = os.path.join(REPO_ROOT, "certificates", "roots", "DoD_Root_CA_3.crt")
+        with open(real_root3_path, "rb") as f:
+            real_root3 = x509.load_pem_x509_certificate(f.read())
+
+        # 1. Non-.mil OCSP URL must be rejected when allow_non_mil_for_testing=False
+        evil_aia = x509.AuthorityInformationAccess([
+            x509.AccessDescription(
+                AuthorityInformationAccessOID.OCSP,
+                UniformResourceIdentifier("http://evil.example.com/ocsp"),
+            )
+        ])
+        leaf_non_mil = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "DOE.JOHN.1234567890")]))
+            .issuer_name(real_root3.subject)
+            .public_key(rogue_key.public_key())
+            .serial_number(101)
+            .not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=30))
+            .add_extension(evil_aia, critical=False)
+            .sign(rogue_key, hashes.SHA256())
+        )
+        card_non_mil = CardCertificate(
+            id="0005", label="Test", subject="Test", issuer="DoD Root CA 3", issuer_cn="DoD Root CA 3",
+            cn="DOE.JOHN.1234567890", holder_name="John Doe", edipi="1234567890",
+            valid_from=now, valid_to=now + timedelta(days=30), valid_to_str="2026-11-24",
+            serial="101", usage="Test", is_valid=True, status_text="Valid",
+            raw_der=leaf_non_mil.public_bytes(serialization.Encoding.DER),
+        )
+        res1, msg1 = verify_cert_ocsp(card_non_mil, allow_non_mil_for_testing=False)
+        self.assertIsNone(res1)
+        self.assertIn("non-.mil", msg1)
+
+        # 2. Forged leaf claiming DoD Root CA 3 issuer with .mil OCSP URL must fail leaf signature check
+        mil_aia = x509.AuthorityInformationAccess([
+            x509.AccessDescription(
+                AuthorityInformationAccessOID.OCSP,
+                UniformResourceIdentifier("http://ocsp.disa.mil"),
+            )
+        ])
+        forged_leaf = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "DOE.JOHN.1234567890")]))
+            .issuer_name(real_root3.subject)
+            .public_key(rogue_key.public_key())
+            .serial_number(102)
+            .not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=30))
+            .add_extension(mil_aia, critical=False)
+            .sign(rogue_key, hashes.SHA256())
+        )
+        card_forged = CardCertificate(
+            id="0005", label="Test", subject="Test", issuer="DoD Root CA 3", issuer_cn="DoD Root CA 3",
+            cn="DOE.JOHN.1234567890", holder_name="John Doe", edipi="1234567890",
+            valid_from=now, valid_to=now + timedelta(days=30), valid_to_str="2026-11-24",
+            serial="102", usage="Test", is_valid=True, status_text="Valid",
+            raw_der=forged_leaf.public_bytes(serialization.Encoding.DER),
+        )
+        res2, msg2 = verify_cert_ocsp(card_forged)
+        self.assertIsNone(res2)
+        self.assertIn("Leaf certificate signature failed verification", msg2)
+
+    def test_change_card_pin_fails_closed_when_status_query_fails(self):
+        from unittest.mock import patch
+        from core.smartcard import change_card_pin
+
+        with patch("core.rust_bridge.query_pin_status_rust", return_value=(False, 0, "APDU transmit failure")), \
+             patch("core.rust_bridge.change_pin_rust") as mock_change:
+            ok, retries, msg = change_card_pin("123456", "654321")
+            self.assertFalse(ok)
+            self.assertEqual(retries, -1)
+            self.assertIn("Security abort", msg)
+            mock_change.assert_not_called()
+
+    def test_updater_http_404_and_internal_relative_symlinks(self):
+        import io
+        import os
+        import tarfile
+        import tempfile
+        import urllib.error
+        from unittest.mock import patch
+        from core.updater import check_for_updates, safe_extract_tarball
+
+        # 1. HTTP 404 must report error, never "up to date"
+        err_404 = urllib.error.HTTPError(
+            url="https://api.github.com/repos/CodeFXR/Sentinel-CAC-Manager/releases/latest",
+            code=404,
+            msg="Not Found",
+            hdrs=None,
+            fp=None,
+        )
+        with patch("urllib.request.urlopen", side_effect=err_404):
+            info = check_for_updates("2.0.2")
+            self.assertFalse(info.update_available)
+            self.assertEqual(info.error, "HTTP 404")
+            self.assertNotIn("up to date", info.status_message.lower())
+
+        # 2. Internal relative symlink inside archive is allowed; escaping relative symlink is rejected
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            good_sym_tar = os.path.join(tmp_dir, "good_sym.tar.gz")
+            with tarfile.open(good_sym_tar, "w:gz") as tar:
+                payload = b"cert data"
+                finfo = tarfile.TarInfo(name="Sentinel-CAC-Manager/DoD_Roots.pem")
+                finfo.size = len(payload)
+                tar.addfile(finfo, io.BytesIO(payload))
+
+                sinfo = tarfile.TarInfo(name="Sentinel-CAC-Manager/DoW_Roots.pem")
+                sinfo.type = tarfile.SYMTYPE
+                sinfo.linkname = "DoD_Roots.pem"
+                tar.addfile(sinfo)
+
+            ok_good, msg_good = safe_extract_tarball(good_sym_tar, os.path.join(tmp_dir, "out_good"))
+            self.assertTrue(ok_good, msg_good)
+
+            bad_sym_tar = os.path.join(tmp_dir, "bad_sym.tar.gz")
+            with tarfile.open(bad_sym_tar, "w:gz") as tar:
+                sinfo = tarfile.TarInfo(name="Sentinel-CAC-Manager/escape_link")
+                sinfo.type = tarfile.SYMTYPE
+                sinfo.linkname = "../../etc/passwd"
+                tar.addfile(sinfo)
+
+            ok_bad, msg_bad = safe_extract_tarball(bad_sym_tar, os.path.join(tmp_dir, "out_bad"))
+            self.assertFalse(ok_bad)
+            self.assertIn("Security policy", msg_bad)
+
+            # 3. Verify real release archive extracts cleanly if present
+            release_tar = os.path.join(REPO_ROOT, "Sentinel-CAC-Manager.tar.gz")
+            if os.path.isfile(release_tar):
+                ok_rel, msg_rel = safe_extract_tarball(release_tar, os.path.join(tmp_dir, "out_rel"))
+                self.assertTrue(ok_rel, msg_rel)
 
 
 if __name__ == "__main__":

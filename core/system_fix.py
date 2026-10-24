@@ -8,6 +8,7 @@ import os
 import queue
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -34,26 +35,38 @@ SYSTEM_HELPER = "/usr/libexec/sentinel/privileged_helper.py"
 def get_helper_script(require_root_owned: bool = True) -> Optional[str]:
     """Return protected root-owned helper in /usr/libexec/sentinel/privileged_helper.py.
 
-    Refuses to fall back to a user-writable repository helper when elevating via pkexec,
-    preventing unprivileged local code execution as root.
+    Always requires both the helper and its parent directory to be owned by root (UID 0)
+    and not group- or world-writable, preventing execution of user-writable code as root.
     """
-    if os.path.isfile(SYSTEM_HELPER):
-        try:
-            st = os.stat(SYSTEM_HELPER)
-            if st.st_uid == 0 and not (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
-                return SYSTEM_HELPER
-        except OSError:
-            pass
+    candidates = [SYSTEM_HELPER]
+    if not require_root_owned:
+        candidates.append(HELPER_SCRIPT)
 
-    if not require_root_owned and os.path.isfile(HELPER_SCRIPT):
-        try:
-            st = os.stat(HELPER_SCRIPT)
-            if not (st.st_mode & stat.S_IWOTH):
-                return HELPER_SCRIPT
-        except OSError:
-            pass
+    for cand in candidates:
+        if os.path.isfile(cand) and not os.path.islink(cand):
+            try:
+                st = os.stat(cand)
+                parent_st = os.stat(os.path.dirname(os.path.abspath(cand)))
+                if (
+                    st.st_uid == 0
+                    and parent_st.st_uid == 0
+                    and not (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+                    and not (parent_st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+                ):
+                    return cand
+            except OSError:
+                pass
 
     return None
+
+
+def is_opensc_config_optimized(content: str) -> bool:
+    """Return True if card_drivers = cac, piv; is active on an uncommented line."""
+    for raw_line in content.splitlines():
+        uncommented = raw_line.split("#", 1)[0].strip()
+        if "card_drivers" in uncommented and "cac" in uncommented and "piv" in uncommented and "=" in uncommented:
+            return True
+    return False
 
 
 def check_missing_packages(plat: Optional[PlatformInfo] = None) -> List[str]:
@@ -108,6 +121,7 @@ def run_privileged_helper(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
     except Exception as e:
         return False, f"Failed to spawn elevated helper process: {e}"
@@ -163,6 +177,10 @@ def run_privileged_helper(
                 break
 
     if timed_out:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            pass
         try:
             proc.kill()
             proc.wait(timeout=3)
@@ -277,6 +295,8 @@ def run_full_setup(
     ff_ready = b_stat.firefox_policy_active or b_stat.firefox_module_loaded
     chrome_ready = b_stat.chrome_module_loaded
 
+    if not card_stat.service_active:
+        browser_errors.append("Smart card daemon (pcscd) is not active after setup.")
     if not ff_ready:
         browser_errors.append("Firefox policy and PKCS#11 security device could not be verified.")
     if not chrome_ready:
@@ -296,12 +316,12 @@ def run_full_setup(
         result["success"] = True
         if card_stat.card_present:
             result["message"] = (
-                "All 4 DoD Root CAs, middleware services, and browser security devices verified; "
+                "All 4 DoD Root CAs, pcscd daemon, and browser configuration files verified; "
                 "inserted CAC is ready for authentication."
             )
         else:
             result["message"] = (
-                "All 4 DoD Root CAs, middleware services, and browser security devices verified. "
+                "All 4 DoD Root CAs, pcscd daemon, and browser configuration files verified. "
                 "Insert a DoD CAC into your reader to authenticate."
             )
         _progress(1.0, "Setup Complete! System trust and browser modules verified.")
@@ -490,9 +510,11 @@ def uninstall_desktop_integration(
     desktop_dir = os.path.join(home, "Desktop")
 
     # Revert user-space browser configurations (NSS module, imported CAs, user.js, pkcs11.txt)
+    browsers_ok = True
     try:
-        uninstall_all_browsers(home_dir=home, log_fn=log_fn)
+        browsers_ok = uninstall_all_browsers(home_dir=home, log_fn=log_fn)
     except Exception as e:
+        browsers_ok = False
         logger.debug(f"Browser cleanup note: {e}")
 
     files_to_remove = [
@@ -519,27 +541,33 @@ def uninstall_desktop_integration(
             pass
 
     removed_count = 0
+    removal_failed = False
     for f in files_to_remove:
         if os.path.islink(f) or os.path.isfile(f):
             try:
                 os.remove(f)
                 removed_count += 1
             except OSError:
-                pass
+                removal_failed = True
 
     if shutil.which("update-desktop-database") and os.path.isdir(app_dir) and home_dir is None:
         subprocess.run(["update-desktop-database", app_dir], capture_output=True)
 
+    svc_ok = True
     try:
         from core.agent import uninstall_systemd_user_service
-        uninstall_systemd_user_service(home_dir=home, log_fn=log_fn)
+        svc_ok, _ = uninstall_systemd_user_service(home_dir=home, log_fn=log_fn)
     except Exception as e:
+        svc_ok = False
         logger.debug(f"Could not cleanly uninstall user service: {e}")
 
+    overall_ok = browsers_ok and not removal_failed and svc_ok
     msg = f"Removed {removed_count} user desktop, browser, and launcher items."
+    if not overall_ok:
+        msg = f"{msg} (One or more user cleanup actions reported warnings/errors.)"
     if log_fn:
         log_fn(msg)
-    return True, msg
+    return overall_ok, msg
 
 
 def run_full_uninstall(log_callback: Optional[Callable[[str], None]] = None) -> bool:
@@ -553,12 +581,18 @@ def run_full_uninstall(log_callback: Optional[Callable[[str], None]] = None) -> 
     plat = detect_platform()
 
     # Step 1: Revert user desktop and browser integration (NSS DB, Firefox prefs, launchers)
-    uninstall_desktop_integration(log_fn=_log)
+    user_ok, user_msg = uninstall_desktop_integration(log_fn=_log)
+    if not user_ok:
+        _log(f"[WARNING] User-level rollback reported issues: {user_msg}")
 
     # Step 2: Elevated uninstallation (system CAs, enterprise policies, OpenSC config, helper)
     ok, helper_msg = run_privileged_helper(["--uninstall", "--family", plat.family], log_fn=_log, timeout=60)
     if not ok:
         _log(f"[ERROR] Privileged rollback failed: {helper_msg}")
+        return False
+
+    if not user_ok:
+        _log("[ERROR] System rollback succeeded, but user-level browser/desktop cleanup was incomplete.")
         return False
 
     _log("[SUCCESS] Full uninstallation and rollback completed successfully.")

@@ -3,6 +3,7 @@ pub mod hardware;
 pub mod security;
 
 use pyo3::prelude::*;
+use zeroize::Zeroize;
 
 use cert::{parse_der_or_pem_bytes, PyCardCertificate};
 use hardware::{
@@ -14,7 +15,7 @@ use security::PinBuffer;
 
 #[pyfunction]
 fn version() -> &'static str {
-    "2.0.1"
+    "2.0.2"
 }
 
 #[pyfunction]
@@ -39,8 +40,11 @@ fn query_pin_status(reader: Option<String>) -> (bool, u8, String) {
 }
 
 #[pyfunction]
-fn change_pin(old_pin: String, new_pin: String, reader: Option<String>) -> (bool, u8, String) {
-    change_piv_pin_native(reader.as_deref(), &old_pin, &new_pin)
+fn change_pin(mut old_pin: String, mut new_pin: String, reader: Option<String>) -> (bool, u8, String) {
+    let res = change_piv_pin_native(reader.as_deref(), &old_pin, &new_pin);
+    old_pin.zeroize();
+    new_pin.zeroize();
+    res
 }
 
 #[pyfunction]

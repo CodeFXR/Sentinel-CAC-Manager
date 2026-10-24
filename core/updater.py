@@ -1,10 +1,11 @@
-"""Secure Release Update Checker and Verifier for Sentinel CAC Manager.
+"""Secure Release Update Checker and Archive Verifier for Sentinel CAC Manager.
 
 Enforces fail-closed supply-chain security:
+- Check-only release notification (never modifies a live installation or root-owned helper in-place)
 - Strict HTTPS origin validation (github.com/CodeFXR/Sentinel-CAC-Manager)
 - Strict semantic version tag validation (^v?\\d+\\.\\d+\\.\\d+$)
-- Mandatory SHA-256 digest verification before any archive extraction
-- Tar-slip (CWE-22) and symlink/device member rejection during extraction
+- Mandatory SHA-256 digest verification before any archive staging
+- Tar-slip (CWE-22), hardlink, escaping symlink, and device member rejection during extraction
 """
 
 from dataclasses import dataclass
@@ -13,11 +14,8 @@ import hmac
 import json
 import os
 import re
-import shutil
 import ssl
-import subprocess
 import tarfile
-import tempfile
 from typing import Callable, Optional, Tuple
 import urllib.error
 import urllib.request
@@ -111,8 +109,8 @@ def check_for_updates(current_version: str = __version__, timeout: float = 5.0) 
                 html_url=ALLOWED_HTML_PREFIX + "releases",
                 download_url=None,
                 expected_sha256=None,
-                status_message=f"v{current_version} is up to date (no newer published release)",
-                error=None,
+                status_message="No published release found on GitHub (HTTP 404)",
+                error="HTTP 404",
             )
         return UpdateInfo(
             current_version=current_version,
@@ -190,7 +188,7 @@ def check_for_updates(current_version: str = __version__, timeout: float = 5.0) 
 
 
 def safe_extract_tarball(tar_path: str, dest_dir: str) -> Tuple[bool, str]:
-    """Safely extract a .tar.gz archive, rejecting path traversal, symlinks, and special files."""
+    """Safely extract a .tar.gz archive, rejecting path traversal, hardlinks, escaping symlinks, and devices."""
     abs_dest = os.path.abspath(dest_dir)
     try:
         with tarfile.open(tar_path, "r:gz") as tar:
@@ -199,8 +197,8 @@ def safe_extract_tarball(tar_path: str, dest_dir: str) -> Tuple[bool, str]:
                 return False, "Archive is empty."
 
             for member in members:
-                if member.issym() or member.islnk():
-                    return False, f"Security policy: Rejected symbolic/hard link in archive ({member.name})"
+                if member.islnk():
+                    return False, f"Security policy: Rejected hard link in archive ({member.name})"
                 if member.isdev() or member.isfifo() or member.ischr() or member.isblk():
                     return False, f"Security policy: Rejected special device file in archive ({member.name})"
                 if member.name.startswith("/") or ".." in member.name.split("/"):
@@ -209,6 +207,14 @@ def safe_extract_tarball(tar_path: str, dest_dir: str) -> Tuple[bool, str]:
                 target_path = os.path.abspath(os.path.join(abs_dest, member.name))
                 if os.path.commonpath([abs_dest, target_path]) != abs_dest:
                     return False, f"Security policy: Archive member escapes destination ({member.name})"
+
+                if member.issym():
+                    linkname = member.linkname or ""
+                    if os.path.isabs(linkname) or ".." in linkname.split("/"):
+                        return False, f"Security policy: Rejected unsafe symbolic link in archive ({member.name})"
+                    link_target = os.path.abspath(os.path.join(os.path.dirname(target_path), linkname))
+                    if os.path.commonpath([abs_dest, link_target]) != abs_dest:
+                        return False, f"Security policy: Symbolic link escapes destination ({member.name})"
 
             for member in members:
                 if hasattr(tarfile, "data_filter"):
@@ -227,7 +233,7 @@ def verify_and_stage_archive(
 ) -> Tuple[bool, str]:
     """Verify SHA-256 digest of archive bytes and extract safely into staging_dir."""
     if not expected_sha256 or not SHA256_RE.match(expected_sha256.strip()):
-        return False, "Security policy: Refusing to apply update without a valid 64-hex SHA-256 digest."
+        return False, "Security policy: Refusing to stage archive without a valid 64-hex SHA-256 digest."
 
     if len(archive_bytes) > MAX_ARCHIVE_BYTES:
         return False, "Security policy: Archive exceeds maximum permitted size."
@@ -253,103 +259,13 @@ def perform_update(
     project_dir: Optional[str] = None,
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> Tuple[bool, str]:
-    """Perform a verified update via signed/pinned Git tag or SHA-256 verified release tarball."""
-    def _log(msg: str):
-        if log_fn:
-            log_fn(msg)
-
-    if not update_info.update_available:
-        return False, f"Already on latest version (v{update_info.current_version})."
-
-    if parse_semver(update_info.tag_name) is None:
-        return False, "Security policy: Rejected invalid release tag format."
-
-    if project_dir is None:
-        project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-    if not os.access(project_dir, os.W_OK):
-        return False, f"Installation directory ({project_dir}) is not writable by current user."
-
-    # Path 1: Git repository tag update if .git is present and clean
-    git_dir = os.path.join(project_dir, ".git")
-    if os.path.isdir(git_dir) and shutil.which("git"):
-        try:
-            status_proc = subprocess.run(
-                ["git", "-C", project_dir, "status", "--porcelain"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if status_proc.returncode == 0 and not status_proc.stdout.strip():
-                _log(f"[UPDATER] Fetching release tag {update_info.tag_name} from origin...")
-                fetch_proc = subprocess.run(
-                    ["git", "-C", project_dir, "fetch", "--tags", "origin"],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if fetch_proc.returncode == 0:
-                    checkout_proc = subprocess.run(
-                        ["git", "-C", project_dir, "checkout", f"refs/tags/{update_info.tag_name}"],
-                        capture_output=True,
-                        text=True,
-                        timeout=15,
-                    )
-                    if checkout_proc.returncode == 0:
-                        _log(f"[UPDATER] Updated repository to tag {update_info.tag_name}. Restart Sentinel to apply.")
-                        return True, f"Updated to {update_info.tag_name} via git tag. Please restart Sentinel."
-        except Exception as e:
-            _log(f"[UPDATER] Git tag update skipped: {e}")
-
-    # Path 2: SHA-256 Verified Release Archive Update
-    if not update_info.download_url or not update_info.download_url.startswith(ALLOWED_DOWNLOAD_PREFIX):
-        return (
-            False,
-            f"No verified release archive URL available. Download manually from {update_info.html_url}",
-        )
-
-    if not update_info.expected_sha256 or not SHA256_RE.match(update_info.expected_sha256):
-        return (
-            False,
-            "Security policy: Refusing automatic update because release asset has no published SHA-256 digest.",
-        )
-
-    staging_dir = tempfile.mkdtemp(prefix="sentinel-update-")
-    try:
-        _log(f"[UPDATER] Downloading {update_info.download_url}...")
-        req = urllib.request.Request(
-            update_info.download_url,
-            headers={"User-Agent": f"Sentinel-CAC-Manager/{update_info.current_version}"},
-            method="GET",
-        )
-        ctx = ssl.create_default_context()
-        with urllib.request.urlopen(req, timeout=30.0, context=ctx) as resp:
-            archive_bytes = resp.read(MAX_ARCHIVE_BYTES + 1)
-
-        ok, msg = verify_and_stage_archive(archive_bytes, update_info.expected_sha256, staging_dir)
-        if not ok:
-            _log(f"[UPDATER] {msg}")
-            return False, msg
-
-        extract_root = os.path.join(staging_dir, "extracted")
-        entries = os.listdir(extract_root)
-        src_root = os.path.join(extract_root, entries[0]) if len(entries) == 1 else extract_root
-        if not os.path.isdir(src_root):
-            return False, "Extracted release archive did not contain a valid application directory."
-
-        for item in os.listdir(src_root):
-            if item in {".git", "Sentinel-CAC-Manager.tar.gz"}:
-                continue
-            s_item = os.path.join(src_root, item)
-            d_item = os.path.join(project_dir, item)
-            if os.path.isdir(s_item):
-                shutil.copytree(s_item, d_item, dirs_exist_ok=True)
-            else:
-                shutil.copy2(s_item, d_item)
-
-        _log(f"[UPDATER] Verified SHA-256 and updated files to v{update_info.latest_version}.")
-        return True, f"Updated to v{update_info.latest_version} (SHA-256 verified). Restart Sentinel to apply."
-    except Exception as e:
-        return False, f"Update failed: {e}"
-    finally:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+    """Fail-closed policy: in-place self-modification is disabled in favor of verified installer upgrades."""
+    _ = project_dir
+    msg = (
+        f"In-place automatic update is disabled by security policy so root-owned helpers and "
+        f"system trust anchors stay synchronized. Download {update_info.tag_name} from "
+        f"{update_info.html_url}, verify its SHA-256 checksum, and run './install'."
+    )
+    if log_fn:
+        log_fn(f"[UPDATER] {msg}")
+    return False, msg

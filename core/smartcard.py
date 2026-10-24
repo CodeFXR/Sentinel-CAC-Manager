@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
+from urllib.parse import urlparse
 
+from core import __version__
+from core.ca_manifest import DOD_CA_DER_FINGERPRINTS, validate_and_reserialize_cert
 from core.rust_bridge import (
     parse_card_certificate_rust,
     parse_pkcs15_list_rust,
@@ -18,6 +23,8 @@ from core.rust_bridge import (
 )
 
 logger = logging.getLogger("sentinel.smartcard")
+MAX_OCSP_RESPONSE_BYTES = 1024 * 1024  # 1 MB ceiling
+_CACHE_TTL_SECONDS = 6.0
 
 
 @dataclass
@@ -65,12 +72,14 @@ class SmartCardStatus:
 
 _CERT_CACHE: Dict[str, List[CardCertificate]] = {}
 _CARD_STATE_CACHE: Dict[str, SmartCardStatus] = {}
+_CARD_STATE_CACHE_TS: Dict[str, float] = {}
 
 
 def clear_smartcard_cache() -> None:
     """Clear in-memory certificate and card state caches."""
     _CERT_CACHE.clear()
     _CARD_STATE_CACHE.clear()
+    _CARD_STATE_CACHE_TS.clear()
 
 
 def is_pcscd_active() -> bool:
@@ -341,19 +350,22 @@ def _verify_public_key_signature(public_key, signature: bytes, tbs_bytes: bytes,
     """Verify an X.509 or OCSP signature against RSA, ECDSA, or EdDSA public keys."""
     from cryptography.hazmat.primitives.asymmetric import rsa, ec, ed25519, ed448, padding
 
-    if isinstance(public_key, rsa.RSAPublicKey):
-        if hash_alg is None:
-            return False
-        public_key.verify(signature, tbs_bytes, padding.PKCS1v15(), hash_alg)
-        return True
-    if isinstance(public_key, ec.EllipticCurvePublicKey):
-        if hash_alg is None:
-            return False
-        public_key.verify(signature, tbs_bytes, ec.ECDSA(hash_alg))
-        return True
-    if isinstance(public_key, (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey)):
-        public_key.verify(signature, tbs_bytes)
-        return True
+    try:
+        if isinstance(public_key, rsa.RSAPublicKey):
+            if hash_alg is None:
+                return False
+            public_key.verify(signature, tbs_bytes, padding.PKCS1v15(), hash_alg)
+            return True
+        if isinstance(public_key, ec.EllipticCurvePublicKey):
+            if hash_alg is None:
+                return False
+            public_key.verify(signature, tbs_bytes, ec.ECDSA(hash_alg))
+            return True
+        if isinstance(public_key, (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey)):
+            public_key.verify(signature, tbs_bytes)
+            return True
+    except Exception:
+        return False
     return False
 
 
@@ -454,7 +466,10 @@ def _verify_ocsp_response_cryptographically(
     return False, "OCSP response signature could not be verified against issuing CA or authorized responder"
 
 
-def verify_cert_ocsp(cert: CardCertificate) -> Tuple[Optional[bool], str]:
+def verify_cert_ocsp(
+    cert: CardCertificate,
+    allow_non_mil_for_testing: bool = False,
+) -> Tuple[Optional[bool], str]:
     """Verify online certificate revocation status via the OCSP responder in cert's AIA extension.
 
     Returns:
@@ -482,7 +497,7 @@ def verify_cert_ocsp(cert: CardCertificate) -> Tuple[Optional[bool], str]:
         except Exception:
             x509_cert = x509.load_pem_x509_certificate(cert.raw_der)
 
-        # 1. Extract AIA OCSP URI
+        # 1. Extract and validate AIA OCSP URI
         ocsp_urls: List[str] = []
         try:
             aia = x509_cert.extensions.get_extension_for_oid(x509.ExtensionOID.AUTHORITY_INFORMATION_ACCESS)
@@ -496,8 +511,15 @@ def verify_cert_ocsp(cert: CardCertificate) -> Tuple[Optional[bool], str]:
             return None, "No OCSP responder URL found in Certificate AIA extension"
 
         ocsp_url = ocsp_urls[0]
+        parsed_url = urlparse(ocsp_url)
+        scheme = (parsed_url.scheme or "").lower()
+        host = (parsed_url.hostname or "").lower().rstrip(".")
+        if scheme not in ("http", "https") or not host:
+            return None, f"Security policy: Rejected invalid OCSP responder URL ({ocsp_url})"
+        if not allow_non_mil_for_testing and not (host == "mil" or host.endswith(".mil")):
+            return None, f"Security policy: Rejected non-.mil OCSP responder host ({host})"
 
-        # 2. Match Issuer CA from bundled DoD certificates
+        # 2. Match Issuer CA from manifest-verified bundled DoD certificates AND verify leaf signature
         issuer_cert: Optional[x509.Certificate] = None
         repo_root = Path(__file__).resolve().parent.parent
         ca_dirs = [
@@ -505,25 +527,44 @@ def verify_cert_ocsp(cert: CardCertificate) -> Tuple[Optional[bool], str]:
             repo_root / "certificates" / "roots",
             repo_root / "certificates" / "all_cas",
         ]
+        allowed_der_hashes = set(DOD_CA_DER_FINGERPRINTS.values())
 
         target_issuer_name = x509_cert.issuer
+        matched_subject_but_invalid_sig = False
         for d in ca_dirs:
             if not d.is_dir():
                 continue
             for cert_file in d.glob("*.crt"):
                 try:
                     data = cert_file.read_bytes()
+                    if validate_and_reserialize_cert(data, cert_file.name) is None:
+                        continue
                     cand = x509.load_pem_x509_certificate(data)
+                    cand_der_hash = hashlib.sha256(
+                        cand.public_bytes(serialization.Encoding.DER)
+                    ).hexdigest().lower()
+                    if cand_der_hash not in allowed_der_hashes:
+                        continue
                     if cand.subject == target_issuer_name:
-                        issuer_cert = cand
-                        break
+                        if _verify_public_key_signature(
+                            cand.public_key(),
+                            x509_cert.signature,
+                            x509_cert.tbs_certificate_bytes,
+                            x509_cert.signature_hash_algorithm,
+                        ):
+                            issuer_cert = cand
+                            break
+                        else:
+                            matched_subject_but_invalid_sig = True
                 except Exception:
                     continue
             if issuer_cert:
                 break
 
         if not issuer_cert:
-            return None, f"Issuer CA certificate not found in local store for {cert.issuer_cn}"
+            if matched_subject_but_invalid_sig:
+                return None, "Security policy: Leaf certificate signature failed verification against DoD issuing CA"
+            return None, f"Issuer CA certificate not found in verified DoD store for {cert.issuer_cn}"
 
         # 3. Build OCSP Request
         builder = ocsp.OCSPRequestBuilder()
@@ -531,19 +572,22 @@ def verify_cert_ocsp(cert: CardCertificate) -> Tuple[Optional[bool], str]:
         ocsp_req = builder.build()
         req_data = ocsp_req.public_bytes(serialization.Encoding.DER)
 
-        # 4. Transmit OCSP Request via HTTP POST
+        # 4. Transmit OCSP Request via HTTP POST with bounded response size
         req = urllib.request.Request(
             ocsp_url,
             data=req_data,
             headers={
                 "Content-Type": "application/ocsp-request",
                 "Accept": "application/ocsp-response",
-                "User-Agent": "Sentinel-CAC-Manager/2.0.1",
+                "User-Agent": f"Sentinel-CAC-Manager/{__version__}",
             },
         )
 
         with urllib.request.urlopen(req, timeout=4.0) as resp:
-            resp_data = resp.read()
+            resp_data = resp.read(MAX_OCSP_RESPONSE_BYTES + 1)
+
+        if len(resp_data) > MAX_OCSP_RESPONSE_BYTES:
+            return None, "Security policy: OCSP response exceeded maximum permitted size (1 MB)"
 
         # 5. Parse OCSP Response
         ocsp_resp = ocsp.load_der_ocsp_response(resp_data)
@@ -669,10 +713,24 @@ def scan_smartcard(force_refresh: bool = False) -> SmartCardStatus:
             pin_status_msg=None,
         )
 
-    # Return cached full card state on periodic polls when reader + ATR are unchanged
+    # Return cached certificate/card metadata within TTL, but ALWAYS query live PIN retry status
     state_cache_key = f"{reader_name or 'default'}:{atr or 'unknown'}"
-    if not force_refresh and state_cache_key in _CARD_STATE_CACHE:
+    cache_age = time.monotonic() - _CARD_STATE_CACHE_TS.get(state_cache_key, 0.0)
+    if not force_refresh and state_cache_key in _CARD_STATE_CACHE and cache_age < _CACHE_TTL_SECONDS:
         cached = _CARD_STATE_CACHE[state_cache_key]
+        from core.rust_bridge import query_pin_status_rust
+        ok_p, retries_p, msg_p = query_pin_status_rust(reader_name or cached.reader_name)
+        live_retries: Optional[int] = None
+        live_locked: bool = False
+        live_msg: Optional[str] = None
+        if retries_p == 255:
+            live_retries = None
+            live_locked = False
+            live_msg = msg_p
+        elif ok_p or retries_p > 0 or (msg_p and "locked" in msg_p.lower()):
+            live_retries = retries_p
+            live_locked = (retries_p == 0)
+            live_msg = msg_p
         return SmartCardStatus(
             service_active=active,
             reader_name=reader_name or cached.reader_name,
@@ -682,9 +740,9 @@ def scan_smartcard(force_refresh: bool = False) -> SmartCardStatus:
             token_label=cached.token_label,
             token_serial=cached.token_serial,
             certificates=cached.certificates,
-            pin_retries_remaining=cached.pin_retries_remaining,
-            pin_locked=cached.pin_locked,
-            pin_status_msg=cached.pin_status_msg,
+            pin_retries_remaining=live_retries,
+            pin_locked=live_locked,
+            pin_status_msg=live_msg,
         )
 
     if native_queried and not card_name and opensc_tool:
@@ -710,16 +768,13 @@ def scan_smartcard(force_refresh: bool = False) -> SmartCardStatus:
         except Exception as e:
             logger.debug(f"pkcs11-tool scan failed: {e}")
 
-    # 3. Read Certificates if card is present
-    key_parts = []
-    if atr:
-        key_parts.append(atr)
+    # 3. Read Certificates if card is present (only cache when unique token_serial or label is known)
+    cache_key: Optional[str] = None
     if token_serial:
-        key_parts.append(token_serial)
+        cache_key = f"{reader_name or 'default'}:{atr or 'unknown'}:{token_serial}"
     elif token_label:
-        key_parts.append(token_label)
+        cache_key = f"{reader_name or 'default'}:{atr or 'unknown'}:{token_label}"
 
-    cache_key = ":".join(key_parts) if key_parts else (f"{reader_name}:unknown" if reader_name else None)
     if cache_key and cache_key in _CERT_CACHE and _CERT_CACHE[cache_key]:
         certificates = _CERT_CACHE[cache_key]
     else:
@@ -757,11 +812,12 @@ def scan_smartcard(force_refresh: bool = False) -> SmartCardStatus:
         pin_status_msg=pin_status_msg,
     )
     _CARD_STATE_CACHE[state_cache_key] = status
+    _CARD_STATE_CACHE_TS[state_cache_key] = time.monotonic()
     return status
 
 
 def change_card_pin(old_pin: str, new_pin: str, reader_name: Optional[str] = None) -> Tuple[bool, int, str]:
-    """Change PIV Cardholder PIN on inserted smart card via native APDUs with final-retry lockout guard.
+    """Change PIV Cardholder PIN on inserted smart card via native APDUs with fail-closed retry verification.
 
     Returns: (is_success, retries_remaining, status_message)
     """
@@ -771,11 +827,18 @@ def change_card_pin(old_pin: str, new_pin: str, reader_name: Optional[str] = Non
     if retries_stat == 0 and msg_stat and "locked" in msg_stat.lower():
         clear_smartcard_cache()
         return False, 0, "Card PIN is locked (0 retries remaining). PUK unblock is required."
-    if ok_stat and retries_stat == 1:
+    if not ok_stat:
         clear_smartcard_cache()
         return (
             False,
-            1,
+            -1,
+            f"Security abort: Could not verify current PIN retry counter before PIN change ({msg_stat or 'status query failed'}).",
+        )
+    if retries_stat <= 1:
+        clear_smartcard_cache()
+        return (
+            False,
+            retries_stat,
             "Refusing automated PIN change: only 1 PIN retry attempt remains. "
             "Authenticate once or use a PUK-capable tool to prevent card lockout.",
         )

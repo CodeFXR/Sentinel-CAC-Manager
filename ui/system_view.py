@@ -12,7 +12,7 @@ from core import __version__
 from core.platform_detector import detect_platform, PlatformInfo
 from core.smartcard import SmartCardStatus
 from core.certificates import is_system_trust_installed
-from core.updater import check_for_updates, perform_update, UpdateInfo
+from core.updater import check_for_updates, UpdateInfo
 from core.browsers import (
     check_browsers_status,
     configure_all_browsers,
@@ -212,7 +212,7 @@ class SystemView(Gtk.Box):
             self.opensc_badge.add_css_class("badge-danger")
 
         # 3. Reader hang fix
-        from core.privileged_helper import is_opensc_config_optimized
+        from core.system_fix import is_opensc_config_optimized
         hang_fixed = False
         for c in ["/etc/opensc/opensc.conf", "/etc/opensc.conf"]:
             if os.path.isfile(c):
@@ -359,7 +359,7 @@ class SystemView(Gtk.Box):
         if info.update_available:
             self.update_badge.set_label(f"Update: {info.tag_name}")
             self.update_badge.add_css_class("badge-warning")
-            self.check_update_btn.set_label("Update Now")
+            self.check_update_btn.set_label("View Release")
             self.check_update_btn.remove_css_class("flat")
             self.check_update_btn.add_css_class("suggested-action")
             self.main_window.show_toast(info.status_message)
@@ -376,48 +376,26 @@ class SystemView(Gtk.Box):
             self.main_window.show_toast(f"Sentinel v{__version__} is up to date.")
 
     def _prompt_confirm_update(self, info: UpdateInfo):
+        sha_note = info.expected_sha256 if info.expected_sha256 else "See release page SHA256SUMS"
         dialog = Adw.MessageDialog.new(
             self.main_window,
             f"Update Available ({info.tag_name})",
-            f"A newer release of Sentinel CAC Manager ({info.tag_name}) is available.\n\n"
+            f"A newer release ({info.tag_name}) is available on GitHub.\n\n"
             f"Installed version: v{info.current_version}\n"
             f"Latest release: {info.tag_name}\n"
-            f"Verification: Pinned Git Tag / SHA-256 Digest",
+            f"SHA-256: {sha_note}\n\n"
+            f"For security, updates are applied via the verified './install' script so root-owned "
+            f"helpers and system trust anchors remain synchronized.",
         )
-        dialog.add_response("cancel", "Later")
-        dialog.add_response("update", "Update Now")
-        dialog.set_response_appearance("update", Adw.ResponseAppearance.SUGGESTED)
-        dialog.set_default_response("update")
+        dialog.add_response("cancel", "Close")
+        dialog.add_response("open", "Open Release Page")
+        dialog.set_response_appearance("open", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("open")
         dialog.set_close_response("cancel")
 
         def _on_response(dlg, response_id):
-            if response_id == "update":
-                self.check_update_btn.set_sensitive(False)
-                self.check_update_btn.set_label("Updating...")
-                threading.Thread(
-                    target=self._run_perform_update,
-                    args=(info,),
-                    daemon=True,
-                ).start()
+            if response_id == "open":
+                self.main_window.diagnostics_view.open_url(info.html_url)
 
         dialog.connect("response", _on_response)
         dialog.present()
-
-    def _run_perform_update(self, info: UpdateInfo):
-        ok, msg = perform_update(info, log_fn=self.main_window.append_log)
-        GLib.idle_add(self._after_perform_update, ok, msg, info)
-
-    def _after_perform_update(self, ok: bool, msg: str, info: UpdateInfo):
-        self.check_update_btn.set_sensitive(True)
-        self.update_row.set_subtitle(msg)
-        self.main_window.show_toast(msg)
-        if ok:
-            self._latest_update_info = None
-            self.update_badge.remove_css_class("badge-warning")
-            self.update_badge.add_css_class("badge-success")
-            self.update_badge.set_label(f"Updated ({info.tag_name})")
-            self.check_update_btn.remove_css_class("suggested-action")
-            self.check_update_btn.add_css_class("flat")
-            self.check_update_btn.set_label("Restart Required")
-        else:
-            self.check_update_btn.set_label("Update Now")

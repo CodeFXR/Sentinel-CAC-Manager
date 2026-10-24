@@ -7,7 +7,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
 
-from core.smartcard import SmartCardStatus, verify_cert_ocsp
+from core.smartcard import SmartCardStatus, scan_smartcard, verify_cert_ocsp
 
 
 class CardsView(Gtk.Box):
@@ -208,8 +208,18 @@ class CardsView(Gtk.Box):
         self.content_box.append(certs_group)
 
     def _show_change_pin_dialog(self, card_stat: SmartCardStatus):
+        fresh_stat = scan_smartcard(force_refresh=True)
+        if fresh_stat.card_present:
+            card_stat = fresh_stat
+        if card_stat.pin_locked or card_stat.pin_retries_remaining == 1:
+            self.main_window.show_toast(
+                "PIN change blocked: card is locked or has only 1 retry remaining."
+            )
+            self.main_window.refresh_all_status(force=True)
+            return
+
         dialog = Adw.Window(title="Change PIV Card PIN", modal=True, transient_for=self.main_window)
-        dialog.set_default_size(440, 420)
+        dialog.set_default_size(440, 440)
 
         header = Adw.HeaderBar()
         header.set_show_end_title_buttons(True)
@@ -232,6 +242,20 @@ class CardsView(Gtk.Box):
         )
         info_label.add_css_class("dim-label")
         form_box.append(info_label)
+
+        low_retry_check = None
+        if card_stat.pin_retries_remaining == 2:
+            warn_label = Gtk.Label(
+                label="Warning: Only 2 PIN verification retries remain on this token. An incorrect current PIN will drop the counter to 1 retry.",
+                wrap=True,
+                xalign=0,
+            )
+            warn_label.add_css_class("error-label")
+            form_box.append(warn_label)
+            low_retry_check = Gtk.CheckButton(
+                label="I confirm I want to proceed with only 2 retries remaining"
+            )
+            form_box.append(low_retry_check)
 
         group = Adw.PreferencesGroup()
         current_pin_row = Adw.PasswordEntryRow(title="Current PIN")
@@ -263,6 +287,12 @@ class CardsView(Gtk.Box):
         submit_btn.add_css_class("suggested-action")
 
         def on_submit(_btn):
+            if low_retry_check is not None and not low_retry_check.get_active():
+                status_label.set_text("Please confirm the 2-retry warning checkbox before proceeding.")
+                status_label.add_css_class("error-label")
+                status_label.set_visible(True)
+                return
+
             curr_pin = current_pin_row.get_text().strip()
             new_pin = new_pin_row.get_text().strip()
             confirm_pin = confirm_pin_row.get_text().strip()

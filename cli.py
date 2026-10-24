@@ -177,6 +177,19 @@ def cmd_change_pin() -> bool:
 
     if card_stat.pin_retries_remaining is not None:
         print(f"[*] Card detected with {card_stat.pin_retries_remaining} verification retries remaining.")
+        if card_stat.pin_retries_remaining == 2:
+            print(
+                "[!] WARNING: Only 2 PIN verification retries remain on this token.\n"
+                "    An incorrect current PIN will drop the counter to 1 retry."
+            )
+            try:
+                ans = input("Type 'YES' to proceed with PIV PIN change: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\nAborted.")
+                return False
+            if ans != "YES":
+                print("[-] PIN change cancelled.")
+                return False
 
     curr_buf = None
     new_buf = None
@@ -268,7 +281,6 @@ def main():
     parser.add_argument("--gui", action="store_true", help="launch graphical interface")
     parser.add_argument("--installer", action="store_true", help="launch graphical setup wizard")
     parser.add_argument("--check-update", action="store_true", help="check GitHub Releases for a newer version")
-    parser.add_argument("--update", action="store_true", help="update Sentinel to the latest SHA-256 verified release")
     parser.add_argument("--uninstall", action="store_true", help="revert system changes and uninstall Sentinel")
 
     args = parser.parse_args()
@@ -309,16 +321,10 @@ def main():
         print(f"Status:          {_clean_term(info.status_message)}")
         if info.update_available:
             print(f"Release URL:     {_clean_term(info.html_url)}")
+            if info.expected_sha256:
+                print(f"Expected SHA256: {_clean_term(info.expected_sha256)}")
+            print("Upgrade Notice:  Download the release archive, verify its SHA-256 checksum, and run './install'.")
         sys.exit(0 if not info.error else 1)
-    elif args.update:
-        from core.updater import check_for_updates, perform_update
-        info = check_for_updates()
-        print(f"[*] {_clean_term(info.status_message)}")
-        if not info.update_available:
-            sys.exit(0 if not info.error else 1)
-        ok, msg = perform_update(info, log_fn=print)
-        print(f"[{'+' if ok else '-'}] {_clean_term(msg)}")
-        sys.exit(0 if ok else 1)
     elif args.setup_all:
         ok = cmd_setup()
         sys.exit(0 if ok else 1)

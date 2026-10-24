@@ -16,8 +16,8 @@ if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
 fi
 
 INSTALL_DIR="${TARGET_HOME}/.local/share/sentinel_cac_manager"
-RELEASE_TAG="v2.0.1"
-REPO_URL="https://github.com/CodeFXR/Sentinel-CAC-Manager/archive/refs/tags/${RELEASE_TAG}.tar.gz"
+RELEASE_TAG="v2.0.2"
+REPO_URL="https://github.com/CodeFXR/Sentinel-CAC-Manager/releases/download/${RELEASE_TAG}/Sentinel-CAC-Manager.tar.gz"
 # Optional override via SENTINEL_ARCHIVE_SHA256 for verified standalone web bootstrap
 EXPECTED_ARCHIVE_SHA256="${SENTINEL_ARCHIVE_SHA256:-}"
 
@@ -122,8 +122,10 @@ elevate_exec() {
         pkexec bash -c "$stage_cmd" _ "$@"
     else
         local launched=0
+        local quoted_args
+        quoted_args=$(printf '%q ' "$@")
         local cmd_str
-        cmd_str=$(printf 'sudo bash -c %q _ %q; echo "Press Enter to continue..."; read -r' "$stage_cmd" "$*")
+        cmd_str=$(printf 'sudo bash -c %q _ %s; echo "Press Enter to continue..."; read -r' "$stage_cmd" "$quoted_args")
         for term in x-terminal-emulator gnome-terminal ptyxis konsole xfce4-terminal mate-terminal alacritty kitty foot xterm; do
             if command -v "$term" >/dev/null 2>&1; then
                 case "$term" in
@@ -213,21 +215,33 @@ if [ "${1:-}" = "--uninstall" ]; then
     echo "================================================================="
     if [ "$EUID" -ne 0 ]; then
         echo "[*] Reverting user-level browser configurations, systemd unit, and launchers..."
-        python3 -c "import sys; sys.path.insert(0, '${SCRIPT_DIR}'); from core.agent import uninstall_systemd_user_service; from core.system_fix import uninstall_desktop_integration; uninstall_systemd_user_service(log_fn=print); uninstall_desktop_integration(log_fn=print)" 2>/dev/null || true
+        USER_OK=1
+        python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from core.system_fix import uninstall_desktop_integration; ok, _ = uninstall_desktop_integration(home_dir=sys.argv[2], log_fn=print); sys.exit(0 if ok else 1)' "${SCRIPT_DIR}" "${TARGET_HOME}" || USER_OK=0
         echo "[*] Requesting administrator authorization to remove system trust and policies..."
         elevate_exec --uninstall
+        if [ "$USER_OK" -ne 1 ]; then
+            echo "[-] Warning: User-level browser/desktop cleanup reported errors." >&2
+            exit 1
+        fi
         echo "[+] Uninstallation complete."
         exit 0
     else
+        USER_OK=1
         if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
-            sudo -u "${SUDO_USER}" env HOME="${TARGET_HOME}" python3 -c "import sys; sys.path.insert(0, '${SCRIPT_DIR}'); from core.agent import uninstall_systemd_user_service; from core.system_fix import uninstall_desktop_integration; uninstall_systemd_user_service(home_dir='${TARGET_HOME}', log_fn=print); uninstall_desktop_integration(home_dir='${TARGET_HOME}', log_fn=print)" 2>/dev/null || true
+            sudo -u "${SUDO_USER}" env HOME="${TARGET_HOME}" python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from core.system_fix import uninstall_desktop_integration; ok, _ = uninstall_desktop_integration(home_dir=sys.argv[2], log_fn=print); sys.exit(0 if ok else 1)' "${SCRIPT_DIR}" "${TARGET_HOME}" || USER_OK=0
         fi
         if [ -f "/usr/libexec/sentinel/privileged_helper.py" ]; then
             python3 /usr/libexec/sentinel/privileged_helper.py --uninstall --family "${FAMILY}"
         elif [ -f "${SCRIPT_DIR}/core/privileged_helper.py" ]; then
             python3 "${SCRIPT_DIR}/core/privileged_helper.py" --uninstall --family "${FAMILY}"
+        else
+            echo "[-] Error: privileged_helper.py not found for system rollback." >&2
+            exit 1
         fi
-        rm -rf /usr/share/sentinel
+        if [ "$USER_OK" -ne 1 ]; then
+            echo "[-] Error: System trust rolled back, but user-level cleanup reported errors." >&2
+            exit 1
+        fi
         echo "[+] System trust and middleware configuration rolled back successfully."
         exit 0
     fi
