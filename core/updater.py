@@ -197,9 +197,27 @@ def safe_extract_tarball(tar_path: str, dest_dir: str) -> Tuple[bool, str]:
                 return False, "Archive is empty."
 
             for member in members:
+                is_dev = bool(member.isdev() or member.isfifo() or member.ischr() or member.isblk())
+                try:
+                    from core.rust_bridge import validate_tar_member_safety_rust
+                    rust_chk = validate_tar_member_safety_rust(
+                        member.name,
+                        bool(member.islnk()),
+                        bool(member.issym()),
+                        is_dev,
+                        member.linkname or "",
+                        int(member.size or 0),
+                    )
+                    if rust_chk is not None:
+                        ok_member, err_member = rust_chk
+                        if not ok_member:
+                            return False, err_member
+                except Exception:
+                    pass
+
                 if member.islnk():
                     return False, f"Security policy: Rejected hard link in archive ({member.name})"
-                if member.isdev() or member.isfifo() or member.ischr() or member.isblk():
+                if is_dev:
                     return False, f"Security policy: Rejected special device file in archive ({member.name})"
                 if member.name.startswith("/") or ".." in member.name.split("/"):
                     return False, f"Security policy: Rejected path traversal in archive ({member.name})"
@@ -238,6 +256,16 @@ def verify_and_stage_archive(
     if len(archive_bytes) > MAX_ARCHIVE_BYTES:
         return False, "Security policy: Archive exceeds maximum permitted size."
 
+    try:
+        from core.rust_bridge import verify_archive_sha256_rust
+        rust_ver = verify_archive_sha256_rust(archive_bytes, expected_sha256.strip(), MAX_ARCHIVE_BYTES)
+        if rust_ver is not None:
+            ok_sha, msg_sha = rust_ver
+            if not ok_sha:
+                return False, msg_sha
+    except Exception:
+        pass
+
     actual_sha256 = hashlib.sha256(archive_bytes).hexdigest().lower()
     if not hmac.compare_digest(actual_sha256, expected_sha256.strip().lower()):
         return (
@@ -259,13 +287,128 @@ def perform_update(
     project_dir: Optional[str] = None,
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> Tuple[bool, str]:
-    """Fail-closed policy: in-place self-modification is disabled in favor of verified installer upgrades."""
-    _ = project_dir
-    msg = (
-        f"In-place automatic update is disabled by security policy so root-owned helpers and "
-        f"system trust anchors stay synchronized. Download {update_info.tag_name} from "
-        f"{update_info.html_url}, verify its SHA-256 checksum, and run './install'."
+    """Apply a cryptographically verified SHA-256 release archive update with transactional rollback.
+
+    Never uses unauthenticated git checkout; strictly requires a 64-hex SHA-256 digest
+    and an official HTTPS GitHub release asset URL.
+    """
+    import shutil
+    import tempfile
+
+    def _log(msg: str) -> None:
+        if log_fn:
+            log_fn(msg)
+
+    if not update_info.update_available:
+        return False, f"Already up to date (v{update_info.current_version})."
+
+    if not update_info.expected_sha256 or not SHA256_RE.match(update_info.expected_sha256.strip()):
+        msg = (
+            "Security policy: Refusing to apply update without a verified 64-hex SHA-256 digest. "
+            f"Verify SHA-256 manually from {update_info.html_url} and run './install'."
+        )
+        _log(f"[UPDATER] {msg}")
+        return False, msg
+
+    if not update_info.download_url or not update_info.download_url.startswith(ALLOWED_DOWNLOAD_PREFIX):
+        msg = "Security policy: Refusing to download update from untrusted or missing asset URL."
+        _log(f"[UPDATER] {msg}")
+        return False, msg
+
+    target_dir = os.path.abspath(
+        project_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     )
-    if log_fn:
-        log_fn(f"[UPDATER] {msg}")
-    return False, msg
+    if not os.path.isdir(target_dir) or not os.access(target_dir, os.W_OK):
+        msg = (
+            f"Installation directory '{target_dir}' requires administrator permissions. "
+            f"Run './install' to upgrade to {update_info.tag_name}."
+        )
+        _log(f"[UPDATER] {msg}")
+        return False, msg
+
+    _log(f"[UPDATER] Downloading {update_info.tag_name} from {update_info.download_url}...")
+    req = urllib.request.Request(
+        update_info.download_url,
+        headers={"User-Agent": f"Sentinel-CAC-Manager/{update_info.current_version}"},
+        method="GET",
+    )
+    ctx = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(req, timeout=30.0, context=ctx) as resp:
+            archive_bytes = resp.read(MAX_ARCHIVE_BYTES + 1)
+    except Exception as e:
+        msg = f"Failed to download release archive: {e}"
+        _log(f"[UPDATER] {msg}")
+        return False, msg
+
+    parent_fs_dir = os.path.dirname(target_dir)
+    if not os.access(parent_fs_dir, os.W_OK):
+        parent_fs_dir = target_dir
+
+    with tempfile.TemporaryDirectory(dir=parent_fs_dir, prefix=".sentinel_stage_") as staging_dir:
+        ok_stage, stage_msg = verify_and_stage_archive(
+            archive_bytes, update_info.expected_sha256, staging_dir
+        )
+        if not ok_stage:
+            _log(f"[UPDATER] {stage_msg}")
+            return False, stage_msg
+
+        extracted_root = os.path.join(staging_dir, "extracted")
+        entries = os.listdir(extracted_root)
+        if len(entries) == 1 and os.path.isdir(os.path.join(extracted_root, entries[0])):
+            source_root = os.path.join(extracted_root, entries[0])
+        else:
+            source_root = extracted_root
+
+        backup_dir = os.path.join(staging_dir, "rollback_backup")
+        os.makedirs(backup_dir, exist_ok=True)
+        staged_items = []
+
+        try:
+            for item in os.listdir(source_root):
+                if item.startswith(".git"):
+                    continue
+                src_item = os.path.join(source_root, item)
+                dst_item = os.path.join(target_dir, item)
+                bak_item = os.path.join(backup_dir, item)
+                if os.path.exists(dst_item) or os.path.islink(dst_item):
+                    shutil.move(dst_item, bak_item)
+                shutil.move(src_item, dst_item)
+                staged_items.append(item)
+        except Exception as e:
+            for item in reversed(staged_items):
+                dst_item = os.path.join(target_dir, item)
+                bak_item = os.path.join(backup_dir, item)
+                try:
+                    if os.path.exists(dst_item) or os.path.islink(dst_item):
+                        if os.path.isdir(dst_item) and not os.path.islink(dst_item):
+                            shutil.rmtree(dst_item)
+                        else:
+                            os.remove(dst_item)
+                    if os.path.exists(bak_item) or os.path.islink(bak_item):
+                        shutil.move(bak_item, dst_item)
+                except OSError:
+                    pass
+            msg = f"Update staging failed and was rolled back cleanly: {e}"
+            _log(f"[UPDATER] {msg}")
+            return False, msg
+
+    helper_sync_note = " Restart the application to load the updated version."
+    sys_helper = "/usr/libexec/sentinel/privileged_helper.py"
+    new_helper = os.path.join(target_dir, "core", "privileged_helper.py")
+    if os.path.isfile(sys_helper) and os.path.isfile(new_helper):
+        try:
+            with open(sys_helper, "rb") as f1, open(new_helper, "rb") as f2:
+                if hashlib.sha256(f1.read()).digest() != hashlib.sha256(f2.read()).digest():
+                    helper_sync_note = (
+                        " Run './install' to synchronize the root-owned privileged helper, "
+                        "then restart the application."
+                    )
+        except OSError:
+            pass
+
+    success_msg = (
+        f"Verified SHA-256 digest and updated to {update_info.tag_name}.{helper_sync_note}"
+    )
+    _log(f"[UPDATER] {success_msg}")
+    return True, success_msg

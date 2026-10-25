@@ -347,6 +347,175 @@ def wait_for_card_event_rust(timeout_ms: int = 3000) -> Optional[Tuple[str, bool
     return None
 
 
+def validate_and_reserialize_ca_rust(
+    data: bytes,
+    fname: str,
+    verify_whitelist: bool = True,
+) -> Optional[Tuple[Optional[bytes], Optional[str]]]:
+    """Validate and reserialize a DoD CA PEM/DER certificate using the native Rust PKI engine.
+
+    Returns (canonical_pem_bytes, error_message) if Rust is available, or None if unavailable.
+    """
+    if is_rust_available() and hasattr(_sentinel_core, "validate_and_reserialize_ca"):
+        try:
+            pem_bytes, err_msg = _sentinel_core.validate_and_reserialize_ca(
+                data, fname, bool(verify_whitelist)
+            )
+            return (bytes(pem_bytes) if pem_bytes is not None else None, err_msg)
+        except Exception as e:
+            logger.debug(f"Rust validate_and_reserialize_ca failed: {e}")
+    return None
+
+
+def verify_ca_file_manifest_rust(filepath: str, fname_override: Optional[str] = None) -> Optional[bool]:
+    """Verify a certificate file against the DoD SHA-256/DER manifest in native Rust."""
+    if is_rust_available() and hasattr(_sentinel_core, "verify_ca_file_manifest"):
+        try:
+            return bool(_sentinel_core.verify_ca_file_manifest(filepath, fname_override))
+        except Exception as e:
+            logger.debug(f"Rust verify_ca_file_manifest failed: {e}")
+    return None
+
+
+def check_ca_bundle_expirations_rust(
+    certs_dir: str,
+    warn_days: int = 180,
+) -> Optional[Tuple[List[str], List[str], List[str]]]:
+    """Inspect bundled DoD certificates in Rust and return (valid, expiring_soon, expired)."""
+    if is_rust_available() and hasattr(_sentinel_core, "check_ca_bundle_expirations"):
+        try:
+            valid, expiring, expired = _sentinel_core.check_ca_bundle_expirations(
+                certs_dir, int(warn_days)
+            )
+            return list(valid), list(expiring), list(expired)
+        except Exception as e:
+            logger.debug(f"Rust check_ca_bundle_expirations failed: {e}")
+    return None
+
+
+def validate_pkcs11_module_path_rust(raw_path: str) -> Optional[Tuple[Optional[str], Optional[str]]]:
+    """Validate PKCS#11 shared library path ownership and permissions in native Rust."""
+    if is_rust_available() and hasattr(_sentinel_core, "validate_pkcs11_module_path"):
+        try:
+            canonical, err = _sentinel_core.validate_pkcs11_module_path(raw_path)
+            return canonical, err
+        except Exception as e:
+            logger.debug(f"Rust validate_pkcs11_module_path failed: {e}")
+    return None
+
+
+def is_opensc_config_optimized_rust(content: str) -> Optional[bool]:
+    """Inspect opensc.conf text (ignoring comments) in native Rust."""
+    if is_rust_available() and hasattr(_sentinel_core, "is_opensc_config_optimized"):
+        try:
+            return bool(_sentinel_core.is_opensc_config_optimized(content))
+        except Exception as e:
+            logger.debug(f"Rust is_opensc_config_optimized failed: {e}")
+    return None
+
+
+def compute_file_sha256_rust(filepath: str) -> Optional[str]:
+    """Compute streaming SHA-256 hex digest of a regular file in native Rust."""
+    if is_rust_available() and hasattr(_sentinel_core, "compute_file_sha256"):
+        try:
+            return _sentinel_core.compute_file_sha256(filepath)
+        except Exception as e:
+            logger.debug(f"Rust compute_file_sha256 failed: {e}")
+    return None
+
+
+def verify_archive_sha256_rust(
+    archive_bytes: bytes,
+    expected_sha256: str,
+    max_bytes: int,
+) -> Optional[Tuple[bool, str]]:
+    """Verify archive bytes against expected 64-hex SHA-256 in constant time using Rust."""
+    if is_rust_available() and hasattr(_sentinel_core, "verify_archive_sha256"):
+        try:
+            ok, msg = _sentinel_core.verify_archive_sha256(
+                archive_bytes, expected_sha256, int(max_bytes)
+            )
+            return bool(ok), str(msg)
+        except Exception as e:
+            logger.debug(f"Rust verify_archive_sha256 failed: {e}")
+    return None
+
+
+def validate_tar_member_safety_rust(
+    member_name: str,
+    is_hardlink: bool,
+    is_symlink: bool,
+    is_device_or_fifo: bool,
+    linkname: str,
+    size: int,
+) -> Optional[Tuple[bool, str]]:
+    """Validate tar member safety against tar-slip, hardlinks, escaping symlinks, and devices in Rust."""
+    if is_rust_available() and hasattr(_sentinel_core, "validate_tar_member_safety"):
+        try:
+            ok, msg = _sentinel_core.validate_tar_member_safety(
+                member_name,
+                bool(is_hardlink),
+                bool(is_symlink),
+                bool(is_device_or_fifo),
+                linkname or "",
+                max(0, int(size)),
+            )
+            return bool(ok), str(msg)
+        except Exception as e:
+            logger.debug(f"Rust validate_tar_member_safety failed: {e}")
+    return None
+
+
+def validate_ocsp_url_rust(url: str, allow_non_mil: bool = False) -> bool:
+    """Validate OCSP responder URL scheme and .mil boundary in native Rust (with Python fallback)."""
+    if is_rust_available() and hasattr(_sentinel_core, "validate_ocsp_url"):
+        try:
+            return bool(_sentinel_core.validate_ocsp_url(url, bool(allow_non_mil)))
+        except Exception as e:
+            logger.debug(f"Rust validate_ocsp_url failed: {e}")
+
+    from urllib.parse import urlparse
+    if not url or any(ord(c) < 0x20 or ord(c) == 0x7F or c.isspace() for c in url):
+        return False
+    parsed = urlparse(url.strip())
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if scheme not in ("http", "https") or not host or "@" in (parsed.netloc or ""):
+        return False
+    if allow_non_mil:
+        return True
+    return host == "mil" or host.endswith(".mil")
+
+
+def extract_ocsp_urls_from_der_rust(
+    der_bytes: bytes,
+    allow_non_mil: bool = False,
+) -> Optional[List[str]]:
+    """Extract AIA OCSP responder URLs directly from X.509 DER bytes in native Rust."""
+    if is_rust_available() and hasattr(_sentinel_core, "extract_ocsp_urls_from_der"):
+        try:
+            return list(_sentinel_core.extract_ocsp_urls_from_der(der_bytes, bool(allow_non_mil)))
+        except Exception as e:
+            logger.debug(f"Rust extract_ocsp_urls_from_der failed: {e}")
+    return None
+
+
+def verify_ocsp_responder_cert_der_rust(
+    responder_der: bytes,
+    issuer_der: bytes,
+) -> Optional[Tuple[bool, bool, str]]:
+    """Verify OCSP responder certificate validity window and EKU authorization in native Rust."""
+    if is_rust_available() and hasattr(_sentinel_core, "verify_ocsp_responder_cert_der"):
+        try:
+            ok_time, ok_auth, msg = _sentinel_core.verify_ocsp_responder_cert_der(
+                responder_der, issuer_der
+            )
+            return bool(ok_time), bool(ok_auth), str(msg)
+        except Exception as e:
+            logger.debug(f"Rust verify_ocsp_responder_cert_der failed: {e}")
+    return None
+
+
 class _PyPinBuffer:
     """Pure-Python fallback for secure PIN storage with zeroization on drop."""
 

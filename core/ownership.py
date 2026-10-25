@@ -16,6 +16,14 @@ DEFAULT_SYSTEM_MANIFEST = "/var/lib/sentinel/ownership_manifest.json"
 
 def compute_file_sha256(filepath: str) -> Optional[str]:
     """Compute SHA-256 hex digest of a regular file."""
+    try:
+        from core.rust_bridge import compute_file_sha256_rust
+        rust_sha = compute_file_sha256_rust(filepath)
+        if rust_sha is not None:
+            return rust_sha
+    except Exception:
+        pass
+
     if not os.path.isfile(filepath) or os.path.islink(filepath):
         return None
     try:

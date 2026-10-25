@@ -228,6 +228,18 @@ def validate_and_reserialize_cert(
         if log_fn:
             log_fn(msg)
 
+    try:
+        from core.rust_bridge import validate_and_reserialize_ca_rust
+        rust_res = validate_and_reserialize_ca_rust(data, fname, verify_whitelist)
+        if rust_res is not None:
+            pem_bytes, err_msg = rust_res
+            if err_msg:
+                _log(err_msg)
+                return None
+            return pem_bytes
+    except Exception:
+        pass
+
     pem_bodies = PEM_CERT_PATTERN.findall(data)
     if not pem_bodies:
         _log(f"Security: Rejected {fname}: contains no valid PEM certificate blocks")
@@ -293,6 +305,14 @@ def validate_and_reserialize_cert(
 
 def verify_file_matches_manifest(filepath: str, fname: Optional[str] = None) -> bool:
     """Return True only if filepath is a regular file whose content matches Sentinel's DoD CA manifest."""
+    try:
+        from core.rust_bridge import verify_ca_file_manifest_rust
+        rust_match = verify_ca_file_manifest_rust(filepath, fname)
+        if rust_match is not None:
+            return rust_match
+    except Exception:
+        pass
+
     if not os.path.isfile(filepath) or os.path.islink(filepath):
         return False
     target_name = fname or os.path.basename(filepath)
@@ -319,6 +339,15 @@ def verify_file_matches_manifest(filepath: str, fname: Optional[str] = None) -> 
 
 def check_bundled_ca_expirations(certs_dir: str, warn_days: int = 180) -> Dict[str, List[str]]:
     """Inspect bundled DoD certificates and return lists of valid, expiring_soon, and expired CAs."""
+    try:
+        from core.rust_bridge import check_ca_bundle_expirations_rust
+        rust_exp = check_ca_bundle_expirations_rust(certs_dir, warn_days)
+        if rust_exp is not None:
+            valid, expiring, expired = rust_exp
+            return {"valid": valid, "expiring_soon": expiring, "expired": expired}
+    except Exception:
+        pass
+
     result: Dict[str, List[str]] = {"valid": [], "expiring_soon": [], "expired": []}
     all_cas_dir = os.path.join(certs_dir, "all_cas")
     if not os.path.isdir(all_cas_dir):

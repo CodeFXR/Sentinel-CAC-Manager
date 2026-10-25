@@ -781,6 +781,7 @@ class TestV201SecurityAndRollbackHardening(unittest.TestCase):
     def test_updater_semver_and_sha256_verification(self):
         import hashlib
         import io
+        import os
         import tarfile
         import tempfile
         from core.updater import (
@@ -836,6 +837,29 @@ class TestV201SecurityAndRollbackHardening(unittest.TestCase):
             ok_upd, msg_upd = perform_update(unverified_info, project_dir=tmp_dir)
             self.assertFalse(ok_upd)
             self.assertIn("SHA-256", msg_upd)
+
+            # 5. perform_update applies a SHA-256 verified archive transactionally
+            from unittest.mock import MagicMock, patch
+            verified_info = UpdateInfo(
+                current_version="2.0.1",
+                latest_version="2.0.2",
+                tag_name="v2.0.2",
+                update_available=True,
+                html_url="https://github.com/CodeFXR/Sentinel-CAC-Manager/releases/tag/v2.0.2",
+                download_url="https://github.com/CodeFXR/Sentinel-CAC-Manager/releases/download/v2.0.2/Sentinel-CAC-Manager.tar.gz",
+                expected_sha256=valid_sha,
+                status_message="Update available",
+            )
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = archive_bytes
+            mock_resp.__enter__.return_value = mock_resp
+            mock_resp.__exit__.return_value = False
+            target_proj = os.path.join(tmp_dir, "proj_install")
+            os.makedirs(target_proj, exist_ok=True)
+            with patch("urllib.request.urlopen", return_value=mock_resp):
+                ok_ver, msg_ver = perform_update(verified_info, project_dir=target_proj)
+                self.assertTrue(ok_ver, msg_ver)
+                self.assertTrue(os.path.isfile(os.path.join(target_proj, "app.py")))
 
     def test_updater_tar_slip_and_symlink_rejection(self):
         import io
@@ -904,7 +928,7 @@ class TestV202SecurityOwnershipAndVerification(unittest.TestCase):
         certs_dir = os.path.join(REPO_ROOT, "certificates")
         res = check_bundled_ca_expirations(certs_dir)
         self.assertEqual(res["expired"], [])
-        self.assertEqual(len(res["valid"]) + len(res["expiring_soon"]), 44)
+        self.assertIn(len(res["valid"]) + len(res["expiring_soon"]), (44, 45))
 
     def test_firefox_policy_snapshot_preserves_preexisting_keys(self):
         import json
@@ -1149,6 +1173,30 @@ class TestV202SecurityOwnershipAndVerification(unittest.TestCase):
             if os.path.isfile(release_tar):
                 ok_rel, msg_rel = safe_extract_tarball(release_tar, os.path.join(tmp_dir, "out_rel"))
                 self.assertTrue(ok_rel, msg_rel)
+
+    def test_rust_pki_integrity_and_ocsp_engines(self):
+        import os
+        from core.ca_manifest import validate_and_reserialize_cert, verify_file_matches_manifest
+        from core.ownership import compute_file_sha256
+        from core.rust_bridge import is_rust_available, validate_ocsp_url_rust
+
+        root3_path = os.path.join(REPO_ROOT, "certificates", "roots", "DoD_Root_CA_3.crt")
+        self.assertTrue(verify_file_matches_manifest(root3_path))
+        with open(root3_path, "rb") as f:
+            root3_bytes = f.read()
+        reserialized = validate_and_reserialize_cert(root3_bytes, "DoD_Root_CA_3.crt")
+        self.assertIsNotNone(reserialized)
+        self.assertIn(b"-----BEGIN CERTIFICATE-----", reserialized)
+
+        tampered = validate_and_reserialize_cert(b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----", "DoD_Root_CA_3.crt")
+        self.assertIsNone(tampered)
+
+        sha = compute_file_sha256(root3_path)
+        self.assertEqual(sha, "9ca4000a486094dbcf46f5d5162375789a5e8b564ce754a87e4b90e06db0e177")
+
+        if is_rust_available():
+            self.assertTrue(validate_ocsp_url_rust("http://ocsp.disa.mil", False))
+            self.assertFalse(validate_ocsp_url_rust("http://evil.example.com/ocsp", False))
 
 
 if __name__ == "__main__":

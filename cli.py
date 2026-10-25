@@ -281,6 +281,7 @@ def main():
     parser.add_argument("--gui", action="store_true", help="launch graphical interface")
     parser.add_argument("--installer", action="store_true", help="launch graphical setup wizard")
     parser.add_argument("--check-update", action="store_true", help="check GitHub Releases for a newer version")
+    parser.add_argument("--update", action="store_true", help="verify SHA-256 and install latest GitHub release")
     parser.add_argument("--uninstall", action="store_true", help="revert system changes and uninstall Sentinel")
 
     args = parser.parse_args()
@@ -313,8 +314,8 @@ def main():
         from core.system_fix import run_full_uninstall
         ok = run_full_uninstall(log_callback=print)
         sys.exit(0 if ok else 1)
-    elif args.check_update:
-        from core.updater import check_for_updates
+    elif args.check_update or args.update:
+        from core.updater import check_for_updates, perform_update
         info = check_for_updates()
         print(f"Current version: v{info.current_version}")
         print(f"Latest release:  {info.tag_name}")
@@ -323,7 +324,11 @@ def main():
             print(f"Release URL:     {_clean_term(info.html_url)}")
             if info.expected_sha256:
                 print(f"Expected SHA256: {_clean_term(info.expected_sha256)}")
-            print("Upgrade Notice:  Download the release archive, verify its SHA-256 checksum, and run './install'.")
+            if args.update:
+                ok_upd, msg_upd = perform_update(info, log_fn=print)
+                sys.exit(0 if ok_upd else 1)
+            else:
+                print("Run 'python3 cli.py --update' or './install' to apply the verified release.")
         sys.exit(0 if not info.error else 1)
     elif args.setup_all:
         ok = cmd_setup()

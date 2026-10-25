@@ -29,13 +29,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Ruff linter
-        run: pip install ruff
+      - name: Install Python test and lint dependencies
+        run: pip install ruff cryptography distro
 
       - name: Lint shell scripts with ShellCheck
         run: |
           bash -n install
-          shellcheck install
+          shellcheck install install.sh
 
       - name: Lint Python codebase with Ruff
         run: ruff check .
@@ -54,14 +54,18 @@ jobs:
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo build --release
+          cp target/release/libsentinel_core.so core/libsentinel_core.so
           cargo test --no-default-features
 
       - name: Run Python unit tests with compiled Rust native accelerator
-        run: python3 -m unittest discover -v
+        run: |
+          python3 -c "from core.rust_bridge import is_rust_available; assert is_rust_available(), 'Rust bridge did not load'"
+          python3 -m unittest discover -v
 
       - name: Privileged Helper Install & Rollback Canary Verification (Ubuntu)
         run: |
-          sudo mkdir -p /usr/local/share/ca-certificates/dod /usr/share/sentinel /etc/firefox/policies
+          sudo mkdir -p /usr/local/share/ca-certificates/dod /usr/share/sentinel /etc/firefox/policies /usr/lib/x86_64-linux-gnu
+          sudo install -m 0644 -o root -g root /dev/null /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so
           echo "ADMIN_CANARY_CERT" | sudo tee /usr/local/share/ca-certificates/dod/DoD_Root_CA_3.crt >/dev/null
           echo "ADMIN_UNRELATED_CERT" | sudo tee /usr/local/share/ca-certificates/dod/Corp_Root_CA.crt >/dev/null
           echo "ADMIN_CUSTOM_NOTE" | sudo tee /usr/share/sentinel/admin_custom.txt >/dev/null

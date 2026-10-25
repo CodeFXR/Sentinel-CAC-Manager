@@ -431,6 +431,20 @@ def _verify_ocsp_response_cryptographically(
     responder_certs = getattr(ocsp_resp, "certificates", None) or []
     for resp_cert in responder_certs:
         try:
+            try:
+                from cryptography.hazmat.primitives import serialization
+                from core.rust_bridge import verify_ocsp_responder_cert_der_rust
+                rust_resp = verify_ocsp_responder_cert_der_rust(
+                    resp_cert.public_bytes(serialization.Encoding.DER),
+                    issuer_cert.public_bytes(serialization.Encoding.DER),
+                )
+                if rust_resp is not None:
+                    ok_time, ok_auth, _ = rust_resp
+                    if not (ok_time and ok_auth):
+                        continue
+            except Exception:
+                pass
+
             if resp_cert.issuer != issuer_cert.subject:
                 continue
 
@@ -518,6 +532,13 @@ def verify_cert_ocsp(
             return None, f"Security policy: Rejected invalid OCSP responder URL ({ocsp_url})"
         if not allow_non_mil_for_testing and not (host == "mil" or host.endswith(".mil")):
             return None, f"Security policy: Rejected non-.mil OCSP responder host ({host})"
+        try:
+            from core.rust_bridge import validate_ocsp_url_rust
+            rust_url_ok = validate_ocsp_url_rust(ocsp_url, allow_non_mil_for_testing)
+            if rust_url_ok is False:
+                return None, f"Security policy: Rejected OCSP responder URL by native validator ({ocsp_url})"
+        except Exception:
+            pass
 
         # 2. Match Issuer CA from manifest-verified bundled DoD certificates AND verify leaf signature
         issuer_cert: Optional[x509.Certificate] = None

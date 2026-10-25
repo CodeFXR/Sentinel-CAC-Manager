@@ -151,6 +151,17 @@ def validate_pkcs11_module_path(module_path: Optional[str]) -> Optional[str]:
     """Validate that a PKCS#11 module path is safe, normalized, under /usr/lib* or /lib*, exists, is root-owned, and is not world-writable."""
     if not module_path:
         module_path = find_default_opensc_module()
+    try:
+        from core.rust_bridge import validate_pkcs11_module_path_rust
+        rust_res = validate_pkcs11_module_path_rust(module_path)
+        if rust_res is not None:
+            canonical, err_msg = rust_res
+            if err_msg:
+                log(f"Security: {err_msg}")
+                return None
+            return canonical
+    except Exception:
+        pass
     if any(c in module_path for c in ("\r", "\n", "\0", '"', "'", ";", "`", "$")):
         log(f"Security: Rejected PKCS#11 module path containing control/meta characters: {module_path!r}")
         return None
@@ -232,6 +243,13 @@ def log(msg):
 
 def is_opensc_config_optimized(content: str) -> bool:
     """Return True if an uncommented card_drivers line in opensc.conf includes piv-II."""
+    try:
+        from core.rust_bridge import is_opensc_config_optimized_rust
+        rust_opt = is_opensc_config_optimized_rust(content)
+        if rust_opt is not None:
+            return rust_opt
+    except Exception:
+        pass
     for line in content.splitlines():
         uncommented = line.split("#", 1)[0].strip()
         if "card_drivers" in uncommented and ("piv-II" in uncommented or "PIV-II" in uncommented):

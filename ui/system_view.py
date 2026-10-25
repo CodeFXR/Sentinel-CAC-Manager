@@ -12,7 +12,7 @@ from core import __version__
 from core.platform_detector import detect_platform, PlatformInfo
 from core.smartcard import SmartCardStatus
 from core.certificates import is_system_trust_installed
-from core.updater import check_for_updates, UpdateInfo
+from core.updater import check_for_updates, perform_update, UpdateInfo
 from core.browsers import (
     check_browsers_status,
     configure_all_browsers,
@@ -359,7 +359,7 @@ class SystemView(Gtk.Box):
         if info.update_available:
             self.update_badge.set_label(f"Update: {info.tag_name}")
             self.update_badge.add_css_class("badge-warning")
-            self.check_update_btn.set_label("View Release")
+            self.check_update_btn.set_label("Install Update" if info.expected_sha256 else "View Release")
             self.check_update_btn.remove_css_class("flat")
             self.check_update_btn.add_css_class("suggested-action")
             self.main_window.show_toast(info.status_message)
@@ -384,18 +384,43 @@ class SystemView(Gtk.Box):
             f"Installed version: v{info.current_version}\n"
             f"Latest release: {info.tag_name}\n"
             f"SHA-256: {sha_note}\n\n"
-            f"For security, updates are applied via the verified './install' script so root-owned "
-            f"helpers and system trust anchors remain synchronized.",
+            f"Updates are verified against the release SHA-256 digest before transactional staging.",
         )
-        dialog.add_response("cancel", "Close")
+        dialog.add_response("cancel", "Cancel")
         dialog.add_response("open", "Open Release Page")
-        dialog.set_response_appearance("open", Adw.ResponseAppearance.SUGGESTED)
-        dialog.set_default_response("open")
+        if info.expected_sha256 and info.download_url:
+            dialog.add_response("update", f"Update to {info.tag_name}")
+            dialog.set_response_appearance("update", Adw.ResponseAppearance.SUGGESTED)
+            dialog.set_default_response("update")
+        else:
+            dialog.set_response_appearance("open", Adw.ResponseAppearance.SUGGESTED)
+            dialog.set_default_response("open")
         dialog.set_close_response("cancel")
 
         def _on_response(dlg, response_id):
             if response_id == "open":
                 self.main_window.diagnostics_view.open_url(info.html_url)
+            elif response_id == "update":
+                self.check_update_btn.set_sensitive(False)
+                self.check_update_btn.set_label("Updating...")
+                threading.Thread(target=self._run_perform_update, args=(info,), daemon=True).start()
 
         dialog.connect("response", _on_response)
         dialog.present()
+
+    def _run_perform_update(self, info: UpdateInfo):
+        ok, msg = perform_update(info, log_fn=self.main_window.append_log)
+        GLib.idle_add(self._after_perform_update, ok, msg, info)
+
+    def _after_perform_update(self, ok: bool, msg: str, info: UpdateInfo):
+        self.check_update_btn.set_sensitive(True)
+        self.update_row.set_subtitle(msg)
+        self.main_window.show_toast(msg)
+        if ok:
+            self._latest_update_info = None
+            self.update_badge.remove_css_class("badge-warning")
+            self.update_badge.add_css_class("badge-success")
+            self.update_badge.set_label(f"Updated ({info.tag_name})")
+            self.check_update_btn.set_label("Restart Required")
+        else:
+            self.check_update_btn.set_label("Retry Update")
