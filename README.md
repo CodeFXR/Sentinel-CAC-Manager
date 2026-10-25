@@ -10,7 +10,7 @@
   <p>
     <img src="https://img.shields.io/badge/Made%20with-GTK4%20%2F%20Libadwaita-00ADD8?style=flat-square" alt="GTK4 Libadwaita" />
     <img src="https://img.shields.io/badge/Language-Python%20%26%20Rust-00ADD8?style=flat-square" alt="Python & Rust" />
-    <img src="https://img.shields.io/badge/Version-v2.0.2-blue?style=flat-square" alt="Version" />
+    <img src="https://img.shields.io/badge/Version-v2.0.3-blue?style=flat-square" alt="Version" />
     <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License" />
   </p>
 
@@ -66,7 +66,7 @@ cd Sentinel-CAC-Manager
 ### Option 2: Clone from Repository
 
 ```bash
-git clone --branch v2.0.2 https://github.com/CodeFXR/Sentinel-CAC-Manager.git
+git clone --branch v2.0.3 https://github.com/CodeFXR/Sentinel-CAC-Manager.git
 cd Sentinel-CAC-Manager
 ./install
 ```
@@ -105,6 +105,7 @@ Sentinel CAC Manager provides both a Libadwaita desktop application and an unatt
 | `sentinel --certs` | Install verified DoD Root CAs into operating system trust only |
 | `sentinel --reader-fix` | Apply OpenSC Broadcom reader driver hang fix |
 | `sentinel --check-update` | Check GitHub Releases for a newer SHA-256 verified version |
+| `sentinel --update` | Download and apply SHA-256 verified update with transactional rollback |
 | `sentinel --uninstall` | Revert Sentinel-managed trust anchors, policies, and browser modules |
 
 ### Desktop Interface

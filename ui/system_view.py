@@ -235,10 +235,21 @@ class SystemView(Gtk.Box):
             self.reader_fix_btn.set_visible(True)
 
         # 4. System CA Trust
+        from core.ca_manifest import check_bundled_ca_expirations, get_certs_dir
+        ca_exp_stat = check_bundled_ca_expirations(get_certs_dir())
         if certs_installed:
-            self.sys_cert_badge.set_label("Installed (DoD Roots)")
-            self.sys_cert_badge.remove_css_class("badge-warning")
-            self.sys_cert_badge.add_css_class("badge-success")
+            if ca_exp_stat["expired"]:
+                self.sys_cert_badge.set_label("Installed (CAs Expired)")
+                self.sys_cert_badge.remove_css_class("badge-success")
+                self.sys_cert_badge.add_css_class("badge-warning")
+            elif ca_exp_stat["expiring_soon"]:
+                self.sys_cert_badge.set_label("Installed (Expiring Soon)")
+                self.sys_cert_badge.remove_css_class("badge-warning")
+                self.sys_cert_badge.add_css_class("badge-success")
+            else:
+                self.sys_cert_badge.set_label("Installed (DoD Roots)")
+                self.sys_cert_badge.remove_css_class("badge-warning")
+                self.sys_cert_badge.add_css_class("badge-success")
             self.sys_cert_btn.set_label("Reinstall")
         else:
             self.sys_cert_badge.set_label("Missing")

@@ -382,3 +382,41 @@ def check_bundled_ca_expirations(certs_dir: str, warn_days: int = 180) -> Dict[s
     except Exception:
         pass
     return result
+
+
+def get_certs_dir(override: Optional[str] = None) -> str:
+    """Discover certificates directory across system, local, and user installs."""
+    system_store = "/usr/share/sentinel/certificates"
+    if os.path.isdir(system_store) and os.path.isdir(os.path.join(system_store, "all_cas")):
+        try:
+            if os.stat(system_store).st_uid == 0:
+                return system_store
+        except Exception:
+            pass
+
+    if override and os.path.isdir(override) and os.path.isdir(os.path.join(override, "all_cas")):
+        if not any(c in override for c in ("\r", "\n", "\0")):
+            return os.path.abspath(override)
+
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [
+        "/usr/share/sentinel/certificates",
+        "/usr/libexec/sentinel/certificates",
+        os.path.join(script_dir, "certificates"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "certificates"),
+    ]
+
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        try:
+            import pwd
+            u_home = pwd.getpwnam(sudo_user).pw_dir
+            candidates.append(os.path.join(u_home, ".local", "share", "sentinel_cac_manager", "certificates"))
+        except Exception:
+            pass
+
+    for c in candidates:
+        if os.path.isdir(c) and os.path.isdir(os.path.join(c, "all_cas")):
+            return c
+
+    return os.path.join(script_dir, "certificates")

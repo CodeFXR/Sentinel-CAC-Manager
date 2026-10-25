@@ -85,12 +85,15 @@ def uninstall_systemd_user_service(
             log_fn(msg)
 
     systemctl = shutil.which("systemctl")
-    if systemctl:
+    if systemctl and home_dir is None:
         try:
             subprocess.run([systemctl, "--user", "stop", "sentinel-agent.service"], capture_output=True)
             subprocess.run([systemctl, "--user", "disable", "sentinel-agent.service"], capture_output=True)
-        except Exception:
-            pass
+            check_act = subprocess.run([systemctl, "--user", "is-active", "sentinel-agent.service"], capture_output=True, text=True)
+            if check_act.returncode == 0 and check_act.stdout.strip() == "active":
+                return False, "sentinel-agent service is still active after stop attempt."
+        except Exception as e:
+            logger.debug(f"systemctl user stop note: {e}")
 
     home = home_dir or os.path.expanduser("~")
     service_file = Path(home) / ".config" / "systemd" / "user" / "sentinel-agent.service"

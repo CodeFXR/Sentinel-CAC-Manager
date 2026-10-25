@@ -734,24 +734,11 @@ def scan_smartcard(force_refresh: bool = False) -> SmartCardStatus:
             pin_status_msg=None,
         )
 
-    # Return cached certificate/card metadata within TTL, but ALWAYS query live PIN retry status
+    # Return cached certificate/card metadata and PIN retry status within TTL
     state_cache_key = f"{reader_name or 'default'}:{atr or 'unknown'}"
     cache_age = time.monotonic() - _CARD_STATE_CACHE_TS.get(state_cache_key, 0.0)
     if not force_refresh and state_cache_key in _CARD_STATE_CACHE and cache_age < _CACHE_TTL_SECONDS:
         cached = _CARD_STATE_CACHE[state_cache_key]
-        from core.rust_bridge import query_pin_status_rust
-        ok_p, retries_p, msg_p = query_pin_status_rust(reader_name or cached.reader_name)
-        live_retries: Optional[int] = None
-        live_locked: bool = False
-        live_msg: Optional[str] = None
-        if retries_p == 255:
-            live_retries = None
-            live_locked = False
-            live_msg = msg_p
-        elif ok_p or retries_p > 0 or (msg_p and "locked" in msg_p.lower()):
-            live_retries = retries_p
-            live_locked = (retries_p == 0)
-            live_msg = msg_p
         return SmartCardStatus(
             service_active=active,
             reader_name=reader_name or cached.reader_name,
@@ -761,9 +748,9 @@ def scan_smartcard(force_refresh: bool = False) -> SmartCardStatus:
             token_label=cached.token_label,
             token_serial=cached.token_serial,
             certificates=cached.certificates,
-            pin_retries_remaining=live_retries,
-            pin_locked=live_locked,
-            pin_status_msg=live_msg,
+            pin_retries_remaining=cached.pin_retries_remaining,
+            pin_locked=cached.pin_locked,
+            pin_status_msg=cached.pin_status_msg,
         )
 
     if native_queried and not card_name and opensc_tool:

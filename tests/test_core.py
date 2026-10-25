@@ -22,9 +22,9 @@ from cli import _clean_term
 
 class TestRustBridge(unittest.TestCase):
     def test_rust_availability(self):
-        # On systems where Rust is compiled, verify version 2.0.2
+        # On systems where Rust is compiled, verify version 2.0.3
         if is_rust_available():
-            self.assertEqual(get_rust_version(), "2.0.2")
+            self.assertEqual(get_rust_version(), "2.0.3")
         else:
             self.assertIsNone(get_rust_version())
 
@@ -376,7 +376,7 @@ class TestSubprocessTimeoutHandling(unittest.TestCase):
 class TestVersionConsistency(unittest.TestCase):
     def test_version_matches(self):
         import core
-        self.assertEqual(core.__version__, "2.0.2")
+        self.assertEqual(core.__version__, "2.0.3")
 
 
 class TestPinManagement(unittest.TestCase):
@@ -1197,6 +1197,247 @@ class TestV202SecurityOwnershipAndVerification(unittest.TestCase):
         if is_rust_available():
             self.assertTrue(validate_ocsp_url_rust("http://ocsp.disa.mil", False))
             self.assertFalse(validate_ocsp_url_rust("http://evil.example.com/ocsp", False))
+
+
+class TestV203SecurityOwnershipAndCorrectness(unittest.TestCase):
+    def test_write_secure_cert_backup_failure_fails_closed(self):
+        import tempfile
+        import os
+        from core.privileged_helper import _write_secure_cert
+
+        src_cert = os.path.join(REPO_ROOT, "certificates", "roots", "DoD_Root_CA_3.crt")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dst_cert = os.path.join(tmp_dir, "DoD_Root_CA_3.crt")
+            orig_admin_content = b"CUSTOM ADMIN ROOT CA CERTIFICATE THAT MUST BE PROTECTED"
+            with open(dst_cert, "wb") as f_orig:
+                f_orig.write(orig_admin_content)
+
+            # Collide backup path with a directory so creating .pre-sentinel-bak raises OSError
+            bak_path = f"{dst_cert}.pre-sentinel-bak"
+            os.makedirs(bak_path, exist_ok=True)
+
+            ok = _write_secure_cert(src_cert, dst_cert, os.path.dirname(src_cert))
+            self.assertFalse(ok, "Expected _write_secure_cert to fail closed when backup fails")
+
+            with open(dst_cert, "rb") as f_check:
+                self.assertEqual(f_check.read(), orig_admin_content)
+
+    def test_symlink_backup_and_restoration(self):
+        import tempfile
+        import os
+        from core.privileged_helper import _write_secure_cert, _remove_or_restore_sentinel_cert_file
+        from core.ownership import get_file_ownership_entry
+
+        src_cert = os.path.join(REPO_ROOT, "certificates", "roots", "DoD_Root_CA_3.crt")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            admin_target = os.path.join(tmp_dir, "admin_ca_target.pem")
+            with open(admin_target, "wb") as f_admin:
+                f_admin.write(b"ADMIN CA TARGET CONTENT")
+
+            sym_link = os.path.join(tmp_dir, "DoD_Root_CA_3.crt")
+            os.symlink(admin_target, sym_link)
+
+            ok_write = _write_secure_cert(src_cert, sym_link, os.path.dirname(src_cert))
+            self.assertTrue(ok_write)
+
+            entry = get_file_ownership_entry(sym_link)
+            self.assertIsNotNone(entry)
+            self.assertTrue(entry.get("was_symlink"))
+            self.assertEqual(entry.get("symlink_target"), admin_target)
+
+            ok_restore = _remove_or_restore_sentinel_cert_file(sym_link)
+            self.assertTrue(ok_restore)
+            self.assertTrue(os.path.islink(sym_link))
+            self.assertEqual(os.readlink(sym_link), admin_target)
+
+    def test_pre_existing_dod_cert_preservation_on_uninstall(self):
+        import tempfile
+        import os
+        from core.privileged_helper import _write_secure_cert, _remove_or_restore_sentinel_cert_file
+
+        src_cert = os.path.join(REPO_ROOT, "certificates", "roots", "DoD_Root_CA_3.crt")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dst_cert = os.path.join(tmp_dir, "DoD_Root_CA_3.crt")
+            with open(src_cert, "rb") as f_s:
+                real_dod_content = f_s.read()
+            with open(dst_cert, "wb") as f_d:
+                f_d.write(real_dod_content)
+
+            ok_write = _write_secure_cert(src_cert, dst_cert, os.path.dirname(src_cert))
+            self.assertTrue(ok_write)
+
+            ok_remove = _remove_or_restore_sentinel_cert_file(dst_cert)
+            self.assertFalse(ok_remove)
+            self.assertTrue(os.path.isfile(dst_cert))
+            with open(dst_cert, "rb") as f_check:
+                self.assertEqual(f_check.read(), real_dod_content)
+
+    def test_firefox_policy_malformed_json_fails_closed(self):
+        import tempfile
+        import os
+        from core.privileged_helper import merge_firefox_policy_file
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target_policy = os.path.join(tmp_dir, "policies.json")
+            malformed_cases = [
+                b"INVALID NOT JSON",
+                b'{"policies": "not a dict"}',
+                b'{"policies": {"SecurityDevices": "not a dict"}}',
+            ]
+            for bad_payload in malformed_cases:
+                with open(target_policy, "wb") as f:
+                    f.write(bad_payload)
+                ok = merge_firefox_policy_file(target_policy, "/usr/lib/opensc-pkcs11.so", "/usr/share/sentinel/cert.pem")
+                self.assertFalse(ok)
+                with open(target_policy, "rb") as f_check:
+                    self.assertEqual(f_check.read(), bad_payload)
+
+    def test_firefox_policy_dow_cac_preservation_and_cas_concurrency(self):
+        import json
+        import tempfile
+        import os
+        from unittest.mock import patch
+        from core.privileged_helper import merge_firefox_policy_file, revert_firefox_policy_file
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target_policy = os.path.join(tmp_dir, "policies.json")
+            initial_data = {
+                "policies": {
+                    "SecurityDevices": {
+                        "DoW CAC": "/opt/custom/dow.so"
+                    }
+                }
+            }
+            with open(target_policy, "w", encoding="utf-8") as f:
+                json.dump(initial_data, f)
+
+            ok_merge = merge_firefox_policy_file(target_policy, "/usr/lib/opensc-pkcs11.so", "/usr/share/sentinel/cert.pem")
+            self.assertTrue(ok_merge)
+
+            with open(target_policy, "r", encoding="utf-8") as f_res:
+                merged = json.load(f_res)
+            self.assertEqual(merged["policies"]["SecurityDevices"]["DoW CAC"], "/opt/custom/dow.so")
+            self.assertEqual(merged["policies"]["SecurityDevices"]["DoD CAC"], "/usr/lib/opensc-pkcs11.so")
+
+            orig_named_temp = tempfile.NamedTemporaryFile
+            def modify_target_during_merge(*args, **kwargs):
+                with open(target_policy, "a", encoding="utf-8") as f_append:
+                    f_append.write("/* concurrent modification */\n")
+                return orig_named_temp(*args, **kwargs)
+
+            with patch("tempfile.NamedTemporaryFile", side_effect=modify_target_during_merge), \
+                 patch("os.replace") as mock_replace:
+                ok_cas = merge_firefox_policy_file(target_policy, "/usr/lib/opensc-pkcs11.so", "/usr/share/sentinel/cert.pem")
+                self.assertFalse(ok_cas)
+                mock_replace.assert_not_called()
+
+            with open(target_policy, "w", encoding="utf-8") as f:
+                json.dump(merged, f)
+            ok_revert = revert_firefox_policy_file(target_policy)
+            self.assertTrue(ok_revert)
+            with open(target_policy, "r", encoding="utf-8") as f_rev:
+                reverted = json.load(f_rev)
+            self.assertEqual(reverted["policies"]["SecurityDevices"].get("DoW CAC"), "/opt/custom/dow.so")
+            self.assertNotIn("DoD CAC", reverted["policies"]["SecurityDevices"])
+
+    def test_updater_rollback_preserves_old_file_and_reports_honest_failures(self):
+        import tempfile
+        import os
+        import shutil
+        from unittest.mock import patch
+        from core.updater import perform_update, UpdateInfo
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            proj_dir = os.path.join(tmp_dir, "sentinel_app")
+            os.makedirs(proj_dir, exist_ok=True)
+            old_file = os.path.join(proj_dir, "critical_config.py")
+            with open(old_file, "w") as f:
+                f.write("# ORIGINAL CRITICAL CONTENT")
+
+            info = UpdateInfo(
+                current_version="2.0.2",
+                latest_version="2.0.3",
+                tag_name="v2.0.3",
+                update_available=True,
+                html_url="https://github.com/CodeFXR/Sentinel-CAC-Manager/releases/tag/v2.0.3",
+                download_url="https://github.com/CodeFXR/Sentinel-CAC-Manager/releases/download/v2.0.3/Sentinel-CAC-Manager.tar.gz",
+                expected_sha256="a" * 64,
+                status_message="Update available",
+            )
+
+            real_move = shutil.move
+            def fail_on_install_move(src, dst):
+                if "critical_config.py" in dst and "extracted" in src:
+                    raise OSError("Disk full simulation on install")
+                return real_move(src, dst)
+
+            with patch("urllib.request.urlopen") as mock_url, \
+                 patch("core.updater.verify_and_stage_archive") as mock_stage, \
+                 patch("shutil.move", side_effect=fail_on_install_move):
+                mock_url.return_value.__enter__.return_value.read.return_value = b"archive data"
+                def fake_stage(data, sha, staging_dir):
+                    extracted = os.path.join(staging_dir, "extracted")
+                    os.makedirs(extracted, exist_ok=True)
+                    with open(os.path.join(extracted, "critical_config.py"), "w") as f:
+                        f.write("# NEW UPDATE CONTENT")
+                    return True, "Extracted successfully"
+                mock_stage.side_effect = fake_stage
+
+                ok_up, msg_up = perform_update(info, project_dir=proj_dir)
+                self.assertFalse(ok_up)
+                self.assertIn("rolled back cleanly", msg_up)
+                with open(old_file, "r") as f:
+                    self.assertEqual(f.read(), "# ORIGINAL CRITICAL CONTENT")
+
+            # Also verify honest reporting when rollback move encounters an error
+            def fail_on_both(src, dst):
+                if "extracted" in src:
+                    raise OSError("Install disk full")
+                if "rollback_backup" in src:
+                    raise OSError("Rollback hardware failure")
+                return real_move(src, dst)
+
+            with patch("urllib.request.urlopen") as mock_url, \
+                 patch("core.updater.verify_and_stage_archive") as mock_stage, \
+                 patch("shutil.move", side_effect=fail_on_both):
+                mock_url.return_value.__enter__.return_value.read.return_value = b"archive data"
+                def fake_stage(data, sha, staging_dir):
+                    extracted = os.path.join(staging_dir, "extracted")
+                    os.makedirs(extracted, exist_ok=True)
+                    with open(os.path.join(extracted, "critical_config.py"), "w") as f:
+                        f.write("# NEW UPDATE CONTENT")
+                    return True, "Extracted successfully"
+                mock_stage.side_effect = fake_stage
+
+                ok_up_err, msg_up_err = perform_update(info, project_dir=proj_dir)
+                self.assertFalse(ok_up_err)
+                self.assertIn("rollback encountered errors", msg_up_err)
+                self.assertIn("Preserved backup state", msg_up_err)
+
+    def test_nss_trust_flags_repair_and_enforcement(self):
+        from unittest.mock import patch, MagicMock
+        from core.certificates import _get_nss_cert_trust_flags
+
+        mock_certutil_output = (
+            "Certificate Nickname                                         Trust Attributes\n"
+            "                                                             SSL,S/MIME,JAR/XPI\n\n"
+            "DoD Root CA 3                                                CT,,\n"
+            "DoD Root CA 4                                                ,,\n"
+        )
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=mock_certutil_output)
+            t3 = _get_nss_cert_trust_flags("certutil", "/fake/db", "DoD Root CA 3")
+            t4 = _get_nss_cert_trust_flags("certutil", "/fake/db", "DoD Root CA 4")
+            self.assertEqual(t3, "CT,,")
+            self.assertEqual(t4, ",,")
+
+    def test_manifest_parity_across_manifest_helper_and_rust(self):
+        from core.ca_manifest import DOD_CA_DER_FINGERPRINTS, DOD_ROOT_DER_FINGERPRINTS
+        from core.privileged_helper import DOD_CA_DER_FINGERPRINTS as HELPER_DER
+
+        self.assertEqual(DOD_CA_DER_FINGERPRINTS, HELPER_DER)
+        self.assertEqual(len(DOD_ROOT_DER_FINGERPRINTS), 4)
+        self.assertEqual(len(DOD_CA_DER_FINGERPRINTS), 45)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,12 @@
 """Secure Release Update Checker and Archive Verifier for Sentinel CAC Manager.
 
 Enforces fail-closed supply-chain security:
-- Check-only release notification (never modifies a live installation or root-owned helper in-place)
+- Transactional release installation and rollback with strict SHA-256 and HTTPS source verification
 - Strict HTTPS origin validation (github.com/CodeFXR/Sentinel-CAC-Manager)
 - Strict semantic version tag validation (^v?\\d+\\.\\d+\\.\\d+$)
 - Mandatory SHA-256 digest verification before any archive staging
 - Tar-slip (CWE-22), hardlink, escaping symlink, and device member rejection during extraction
+- Pre-move rollback journaling, post-update health smoke check, and failure-preserving backups
 """
 
 from dataclasses import dataclass
@@ -362,33 +363,128 @@ def perform_update(
 
         backup_dir = os.path.join(staging_dir, "rollback_backup")
         os.makedirs(backup_dir, exist_ok=True)
-        staged_items = []
+        journal = []
+        rollback_errors = []
 
         try:
-            for item in os.listdir(source_root):
-                if item.startswith(".git"):
-                    continue
+            # 1. Check for obsolete files from previous updates
+            prior_items_manifest = os.path.join(target_dir, ".sentinel_release_items.json")
+            prior_tracked = []
+            if os.path.isfile(prior_items_manifest):
+                try:
+                    with open(prior_items_manifest, "r", encoding="utf-8") as f_pi:
+                        prior_tracked = json.load(f_pi)
+                except Exception:
+                    prior_tracked = []
+
+            new_release_items = [
+                i for i in os.listdir(source_root)
+                if not i.startswith(".git")
+            ]
+
+            # Prune obsolete files tracked in prior updates that are missing in new release
+            for obsolete in prior_tracked:
+                if obsolete not in new_release_items and not obsolete.startswith(".git"):
+                    obs_target = os.path.join(target_dir, obsolete)
+                    obs_bak = os.path.join(backup_dir, obsolete)
+                    if os.path.exists(obs_target) or os.path.islink(obs_target):
+                        entry = {
+                            "item": obsolete,
+                            "dst": obs_target,
+                            "bak": obs_bak,
+                            "had_existing": True,
+                            "backed_up": False,
+                            "installed": False,
+                            "was_obsolete_prune": True,
+                        }
+                        journal.append(entry)
+                        shutil.move(obs_target, obs_bak)
+                        entry["backed_up"] = True
+
+            # 2. Stage new release items
+            for item in new_release_items:
                 src_item = os.path.join(source_root, item)
                 dst_item = os.path.join(target_dir, item)
                 bak_item = os.path.join(backup_dir, item)
-                if os.path.exists(dst_item) or os.path.islink(dst_item):
+                had_existing = os.path.exists(dst_item) or os.path.islink(dst_item)
+
+                entry = {
+                    "item": item,
+                    "dst": dst_item,
+                    "bak": bak_item,
+                    "had_existing": had_existing,
+                    "backed_up": False,
+                    "installed": False,
+                    "was_obsolete_prune": False,
+                }
+                journal.append(entry)
+
+                if had_existing:
                     shutil.move(dst_item, bak_item)
+                    entry["backed_up"] = True
                 shutil.move(src_item, dst_item)
-                staged_items.append(item)
+                entry["installed"] = True
+
+            # 3. Save new release items manifest
+            with open(prior_items_manifest, "w", encoding="utf-8") as f_out:
+                json.dump(new_release_items, f_out, indent=2)
+
+            # 4. Post-update health smoke check (verifies core package loads and version is intact)
+            if os.path.isdir(os.path.join(target_dir, "core")):
+                import subprocess
+                import sys
+                health_check = subprocess.run(
+                    [
+                        sys.executable,
+                        "-I",
+                        "-c",
+                        "import sys; sys.path.insert(0, sys.argv[1]); import core; assert hasattr(core, '__version__')",
+                        target_dir,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if health_check.returncode != 0:
+                    err_out = health_check.stderr.strip() or health_check.stdout.strip()
+                    raise RuntimeError(f"Post-update health check failed (code {health_check.returncode}): {err_out}")
+
         except Exception as e:
-            for item in reversed(staged_items):
-                dst_item = os.path.join(target_dir, item)
-                bak_item = os.path.join(backup_dir, item)
+            # Perform reverse rollback based on journal
+            for entry in reversed(journal):
+                dst = entry["dst"]
+                bak = entry["bak"]
                 try:
-                    if os.path.exists(dst_item) or os.path.islink(dst_item):
-                        if os.path.isdir(dst_item) and not os.path.islink(dst_item):
-                            shutil.rmtree(dst_item)
+                    if entry["installed"]:
+                        if os.path.isdir(dst) and not os.path.islink(dst):
+                            shutil.rmtree(dst)
+                        elif os.path.exists(dst) or os.path.islink(dst):
+                            os.remove(dst)
+                    if entry["backed_up"] and (os.path.exists(bak) or os.path.islink(bak)):
+                        shutil.move(bak, dst)
+                except Exception as rollback_err:
+                    rollback_errors.append(f"{entry['item']}: {rollback_err}")
+
+            if rollback_errors:
+                # Never wipe un-restored backups! Preserve backup directory for manual administrator recovery
+                recovery_dir = tempfile.mkdtemp(prefix="sentinel_update_recovery_")
+                try:
+                    for b_f in os.listdir(backup_dir):
+                        src_bf = os.path.join(backup_dir, b_f)
+                        dst_bf = os.path.join(recovery_dir, b_f)
+                        if os.path.isdir(src_bf):
+                            shutil.copytree(src_bf, dst_bf)
                         else:
-                            os.remove(dst_item)
-                    if os.path.exists(bak_item) or os.path.islink(bak_item):
-                        shutil.move(bak_item, dst_item)
-                except OSError:
+                            shutil.copy2(src_bf, dst_bf)
+                except Exception:
                     pass
+                msg = (
+                    f"Update staging failed and rollback encountered errors ({'; '.join(rollback_errors)}). "
+                    f"Preserved backup state at '{recovery_dir}' for manual recovery. Original error: {e}"
+                )
+                _log(f"[UPDATER] {msg}")
+                return False, msg
+
             msg = f"Update staging failed and was rolled back cleanly: {e}"
             _log(f"[UPDATER] {msg}")
             return False, msg

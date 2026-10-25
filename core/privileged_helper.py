@@ -5,7 +5,6 @@ under a single pkexec / sudo invocation so the user only authenticates ONCE.
 """
 
 import argparse
-import base64
 import glob
 import hashlib
 import json
@@ -18,114 +17,50 @@ import sys
 import tempfile
 from typing import Optional
 
-SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = os.path.dirname(_THIS_DIR) if os.path.basename(_THIS_DIR) == "core" else _THIS_DIR
+for _p in (SCRIPT_DIR, _THIS_DIR, os.path.join(_THIS_DIR, "core")):
+    if os.path.isdir(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
 
-# Cryptographic SHA-256 file digest manifest for official DoD certificates.
-DOD_CA_FINGERPRINTS = {
-    "DOD_DERILITY_CA-1.crt": "b792d3cd0a8d2b077ea81cab0c6cd4edc018b054b89c59268d42a5590bd691ff",
-    "DOD_DERILITY_CA-3.crt": "365049baa57070951e53dc9011006d94f95b31baff9404fbf2a1734675559d84",
-    "DOD_DERILITY_CA-4.crt": "69e4b7ac1dbd472c2b561775e0d992d2a2ec8a9e2dad537693740f0340016805",
-    "DOD_DERILITY_CA-5.crt": "8416b0a5526c15f294309ed19cc790439b09b10755b7a370f670cac64dc810d7",
-    "DOD_DERILITY_CA-6.crt": "713112199a0198a97837d8a3bca13c218bc7ec6590ced816ebdd8d7ea8b3c1a5",
-    "DOD_EMAIL_CA-62.crt": "aa418e09adc19edb0a0302e01120a07d68f60cf05c2c4c28aef24af93b9a7d26",
-    "DOD_EMAIL_CA-63.crt": "e0471278a605146108bcfb6cd8408ec94d497c2e912d91b13dc8c4d85e6474a7",
-    "DOD_EMAIL_CA-64.crt": "433098257647e0fd92b2262bf58b16dacc54a98f51cf8b5be5d47dbb5d92b1a1",
-    "DOD_EMAIL_CA-65.crt": "adb54e87d349dcc5665652d83274815da10e5cd18640a5f84a4ed90b96a83bc6",
-    "DOD_EMAIL_CA-70.crt": "3988b7899fb52ba764169db787d7ae357b12f76e361d20c631cb41740fca6b69",
-    "DOD_EMAIL_CA-71.crt": "97b6bcd92d05f4e4c764560365b4ed728f983ab48477286e106e4100c28a275d",
-    "DOD_EMAIL_CA-72.crt": "b342f980fd1a88ad4605447db67eae6163ba33cb7e108ac9ace482a0139a9988",
-    "DOD_EMAIL_CA-73.crt": "93f52cbb1c9666e5b9bc7dd7b901816560ee0d82edad97137aec35531b21761f",
-    "DOD_EMAIL_CA-78.crt": "4f3ee6ddd7821cb9d49d09805ce3678d1ba521efc44d6f146fe79363b3170b9b",
-    "DOD_EMAIL_CA-79.crt": "ef60845fc4d2bedcb404a7d7b375229e6a6dee6c2def84866f3dd0a14acd639b",
-    "DOD_EMAIL_CA-80.crt": "bf463e544dbc8b2dbe588ef957df9251af2deb9171916fc1371f0ccaa7b73633",
-    "DOD_EMAIL_CA-81.crt": "87696e907b5c9bb7bb407480559bd98e07b54d0a47d748540b01ce0bac379fcf",
-    "DOD_ID_CA-62.crt": "25f2aa5eb6ebff9b66ffde5c62fea0d4eb791ec7fa7ff6f2e388126c74100ed0",
-    "DOD_ID_CA-63.crt": "7649a6591cebc1c6400195caacba43e76d2588a2025eba49eb2d2cafe2c097ae",
-    "DOD_ID_CA-64.crt": "c81bd68f5b7453aa99c471fe79f2eeba643e9b0ff2466235b6b9deecfac841c9",
-    "DOD_ID_CA-65.crt": "15896437be65f4c922b51623b40621a362483175638c567f6738b5a8d136b3cb",
-    "DOD_ID_CA-70.crt": "1fd13654266223a348e79f827a3f358ccf803215955990982d32009b270d9b2e",
-    "DOD_ID_CA-71.crt": "9d93bfba93a82b8532ff3985b81fcf26dd42f878e8ab397a857ee6ba52db4306",
-    "DOD_ID_CA-72.crt": "d53d3673229377b608f52f622a6db780baed0692ceb16593f1f87b45257cf005",
-    "DOD_ID_CA-73.crt": "a4d2016bff3e1baec36b42a4921ec3d7ef8b3130e10bb1b02cf0c01babf8a3df",
-    "DOD_ID_CA-78.crt": "178f10e93fb7966d437cf40f02115237f558704337a482f020d63cd9b004ae76",
-    "DOD_ID_CA-79.crt": "3d49e89b592e2eeb4389fb82747e1e67e5389c7d25d70352c9df9480f83cebd9",
-    "DOD_ID_CA-80.crt": "17038dc5ccd48f4ed0677dea3758d7059d0fec7aeb0aeaa748f80d0133a8d577",
-    "DOD_ID_CA-81.crt": "09a0be8af9309bb53bbc643f7178a6b3d6e12f59907a7a2116fef53ac099c5ce",
-    "DOD_SW_CA-66.crt": "6c592affece2d6bfcc51a5d74a8bf72f2a730554bfb886169cef4a692c1c077f",
-    "DOD_SW_CA-67.crt": "a3f6b2e15d03b2be4b38d870fc483b7b29096978cbf469b23a55469bcf528f8e",
-    "DOD_SW_CA-68.crt": "5043ab9bf7978b0292ed6f3e9c5057e86eab5d9107845766e878ddec2249c38a",
-    "DOD_SW_CA-69.crt": "210c46224b7375fcf246165163c30185e41ec4df0730b10b9afa2fe79c4fa538",
-    "DOD_SW_CA-74.crt": "bc3e078e31530686c0a058c0911aa1ccb80cbba0fd54c19c60f06f567ada2104",
-    "DOD_SW_CA-75.crt": "8ee4b5c2731dad2a18e13eab0289ab7a52622ff55272ae796a0b5d20fcdb6cde",
-    "DOD_SW_CA-76.crt": "550b688a41e6841c649b876e74d4a67331832ca834195bb78411036448dfa975",
-    "DOD_SW_CA-77.crt": "2a5c88ce7e20096fdf6c739dc54d842996b6e75fc6d05913b0f3b06ede151db8",
-    "DOD_SW_CA-82.crt": "81498acfe45eda7f67bef9c345618fec8efa8b612fd9c9bbb016306b04f2c5b5",
-    "DOD_SW_CA-83.crt": "612625a070c229a89f4137995989689cace809ab75f1879c80adaee10c45acee",
-    "DOD_SW_CA-84.crt": "4c7245e536c95d8035604e516e8a32b09670f33545de7cba06075da0757364f7",
-    "DOD_SW_CA-85.crt": "d9ed4f3ebec2295f4a792a008a905e540f95834531540434a66c3a697ab3de35",
-    "DoD_Full_Chain.crt": "df8f157b983be4673caee0154e0df1780981ee5865102b78aea0122550dd4c1d",
-    "DoD_Full_Chain.pem": "df8f157b983be4673caee0154e0df1780981ee5865102b78aea0122550dd4c1d",
-    "DoD_Root_CA_3.crt": "9ca4000a486094dbcf46f5d5162375789a5e8b564ce754a87e4b90e06db0e177",
-    "DoD_Root_CA_4.crt": "488cac7d9d9fe818945410a5d37713ac3ebbd8d5a36f71d489278c8ba334b27c",
-    "DoD_Root_CA_5.crt": "07820e449f9543fa02f9f207cd0babb15d82d7f2dea34874e8e85a2a3f55a0a4",
-    "DoD_Root_CA_6.crt": "6936a739b3327f15c563d106862c5b9406c6be24cb5656288ada6826783e0ff4",
-    "DoD_Roots.pem": "0b3070a1f74f5d370f758b9c0ea570e9a1d941fb71076969bb2d7902b7226779",
-    "DoW_Full_Chain.crt": "df8f157b983be4673caee0154e0df1780981ee5865102b78aea0122550dd4c1d",
-    "DoW_Full_Chain.pem": "df8f157b983be4673caee0154e0df1780981ee5865102b78aea0122550dd4c1d",
-    "DoW_Roots.pem": "0b3070a1f74f5d370f758b9c0ea570e9a1d941fb71076969bb2d7902b7226779",
-}
-
-# Canonical ASN.1 DER SHA-256 certificate fingerprints (immune to CRLF/LF line-ending variance).
-DOD_CA_DER_FINGERPRINTS = {
-    "DOD_DERILITY_CA-1.crt": "67a953b9e17f77599c6e553053dcd43fd7478fdd5cbd844612ceb6064386f8df",
-    "DOD_DERILITY_CA-3.crt": "83eea7e541716dcfb4b705a44e34f7e0af86d839c7cd796962a70e91d4932646",
-    "DOD_DERILITY_CA-4.crt": "8112237903e9a9afdc4e5bec6970c3ef09c9a63897da4156c22a77d355ad0deb",
-    "DOD_DERILITY_CA-5.crt": "70a011a6b00759f6ab1d08acb3f646d66f578e41f71f1c9586e1f470f4576870",
-    "DOD_DERILITY_CA-6.crt": "4f6c4dc6800346464db209f5a05ec1f4019e7ba48f7346011d9643d2e4b3eace",
-    "DOD_EMAIL_CA-62.crt": "36490d91175ca3b39b21b21941db70635c58a3fd0f51135af9f0edc15cbf55b6",
-    "DOD_EMAIL_CA-63.crt": "c6a4dac9fd846474ea35c52afada31510d388ee5af694d8e7f7300eee73cbd2f",
-    "DOD_EMAIL_CA-64.crt": "690c69044761d3a9ab208e4ef2c7b461f09ab524137e7d059176324df42480d8",
-    "DOD_EMAIL_CA-65.crt": "d483b29aae8b40d62ad4757f2986a6d541c4241383d7928592fc61ba5d01085a",
-    "DOD_EMAIL_CA-70.crt": "2ad7d00e45d128a46fdb5747d39eaa994f034086d05cb891e01bf61c7d97c083",
-    "DOD_EMAIL_CA-71.crt": "9d7e0bfb84d6a5f66cfd701b786dc75db31422687212bf26c276b70df0627bdb",
-    "DOD_EMAIL_CA-72.crt": "22ffd6b58540bed6f568890348da2654ca54b50f2216c9eade78812782206ba2",
-    "DOD_EMAIL_CA-73.crt": "ca4733b4e471a699d025fa88cee35e07372dcaa9cfe609469c16a72ec5595cf7",
-    "DOD_EMAIL_CA-78.crt": "2c95f5c815569b65cdf70d03f135f2cf130b82b33d5719a68d25a1ec19d405fc",
-    "DOD_EMAIL_CA-79.crt": "3d8d7bf0c6381aa07ff5e0aa47fec6d077aeec1c2ee22183b2c2028a2ff35d68",
-    "DOD_EMAIL_CA-80.crt": "8208232225e469e65e93497402be9a377d81a25938b85ccae3f3adc14078de93",
-    "DOD_EMAIL_CA-81.crt": "8dc6e3657631ec33de1706c2803662786c120825d121b5dd4b1c90b126654967",
-    "DOD_ID_CA-62.crt": "a3626dfa33eadf6f1ac300a733f52322c6cdc59f5d561e2188c493d016c49dd5",
-    "DOD_ID_CA-63.crt": "dd2dc71d5affa281ceb4da78d58a8119ffe606d732dab5343b2b1c3de4993613",
-    "DOD_ID_CA-64.crt": "fc6fd238f81a3b1755db3bc5471440a186ef3ab4e9ea6d76c2e157c22236b482",
-    "DOD_ID_CA-65.crt": "80e252331942dcaaaa7de7fb450ee9610081f44bbe164fe9936a759ba4541e5b",
-    "DOD_ID_CA-70.crt": "3ccc94baa9108ef0ca373b89074b8cfac6c0cf0f07ab190c570d5053032f337a",
-    "DOD_ID_CA-71.crt": "f7ba690fe17cff7b191ac6d32522931c6f472df487574f0d1c576da0d2ab7049",
-    "DOD_ID_CA-72.crt": "b1c14ea631f47bcd7698e7673fdf5b5b104c52631ce58913346ec7a07e154638",
-    "DOD_ID_CA-73.crt": "3d6a666556365400d6e2beed9dd97082537fb74887a5c68b426eb06c327e0826",
-    "DOD_ID_CA-78.crt": "bbaf5275b33aff5aa9e5bce945640ac0c08f4a4d02d7d2e26e78293e912231ce",
-    "DOD_ID_CA-79.crt": "4a3a111b697959d3f620cbf9f5150e4087861d47a695860aff8136a819a71e1a",
-    "DOD_ID_CA-80.crt": "ad6bb50b82da2f99c242d7971012175809b22af0112f1e695ef3c236c7d2f22e",
-    "DOD_ID_CA-81.crt": "abdc810cf17cea00bbaace9418b872c25cf8bf3d7694a4e05b9f391d23b80d03",
-    "DOD_SW_CA-66.crt": "79dd87d87503bd9c422b49e2bf7a23a5c0783cce85d588759f3a349ec26eb84a",
-    "DOD_SW_CA-67.crt": "cca9b469b4edda4d615b58c130ecaebba5ca439adbee8be15206626e5122f4ca",
-    "DOD_SW_CA-68.crt": "dcd29a5b27db87d5d617f395edad6d7fa0fe230117afbf6c4b7f31f372a2e66a",
-    "DOD_SW_CA-69.crt": "3320f4876c4d0fa7118f2891a1421bb3cda7bb64be80f9bd040bcff6faa3dbee",
-    "DOD_SW_CA-74.crt": "6338c57b568b1d47568ab7548a8d66cc31bc4a096a4cc10a4b45edeb09bd65f6",
-    "DOD_SW_CA-75.crt": "6cbc8895834385d27678cb0012d224277b02dcfc4502bceafdfe1a0a2543f416",
-    "DOD_SW_CA-76.crt": "0e0f71389c9937334989842a908206e671f356a10903e2cf398abb5e27b3f40c",
-    "DOD_SW_CA-77.crt": "48e2775e6db09931c3d62a913889affc653aa9d9142ac4c10bd11f6968fc4a31",
-    "DOD_SW_CA-82.crt": "7aafb4a72e96483d9db2b4226dcead0bb01a95c236768c7a0f681abf5f168e81",
-    "DOD_SW_CA-83.crt": "cc88db853e8f8c2c61f40f281ebca7ed08a082e1ac10679b785db9f76e9b7015",
-    "DOD_SW_CA-84.crt": "560eb4465753bd286bf65fd0d16256fd126daa0d1d5abbe9ff7a5688ae830357",
-    "DOD_SW_CA-85.crt": "6fa364cfc7ecdc69e581d20f0bcea306f8d8a52142b3dadda949276db1061098",
-    "DoD_Root_CA_3.crt": "b107b33f453e5510f68e513110c6f6944bacc263df0137f821c1b3c2f8f863d2",
-    "DoD_Root_CA_4.crt": "559a5189452b13f8233f0022363c06f26e3c517c1d4b77445035959df3244f74",
-    "DoD_Root_CA_5.crt": "1f4ede9dc2a241f6521bf518424acd49ebe84420e69daf5bac57af1f8ee294a9",
-    "DoD_Root_CA_6.crt": "2a5e41aca93df7cc496d2369b7a0a037045d502f1abaaf76975fc07c6660cf93",
-}
-
-DOD_ROOT_FILES = ("DoD_Root_CA_3.crt", "DoD_Root_CA_4.crt", "DoD_Root_CA_5.crt", "DoD_Root_CA_6.crt")
-DOD_ROOT_DER_FINGERPRINTS = {k: DOD_CA_DER_FINGERPRINTS[k] for k in DOD_ROOT_FILES}
+try:
+    from core.ca_manifest import (
+        DOD_CA_FINGERPRINTS,
+        DOD_CA_DER_FINGERPRINTS,
+        DOD_ROOT_FILES,
+        SAFE_CERT_FILENAME,
+        extract_der_from_pem_body,
+        get_certs_dir,
+        validate_and_reserialize_cert,
+        verify_file_matches_manifest,
+    )
+    from core.ownership import (
+        get_file_ownership_entry,
+        get_firefox_policy_snapshot,
+        record_firefox_policy_snapshot,
+        record_installed_file,
+        remove_file_ownership_entry,
+        remove_firefox_policy_snapshot,
+    )
+except ImportError:
+    from ca_manifest import (  # type: ignore
+        DOD_CA_FINGERPRINTS,
+        DOD_CA_DER_FINGERPRINTS,
+        DOD_ROOT_FILES,
+        SAFE_CERT_FILENAME,
+        extract_der_from_pem_body,
+        get_certs_dir,
+        validate_and_reserialize_cert,
+        verify_file_matches_manifest,
+    )
+    from ownership import (  # type: ignore
+        get_file_ownership_entry,
+        get_firefox_policy_snapshot,
+        record_firefox_policy_snapshot,
+        record_installed_file,
+        remove_file_ownership_entry,
+        remove_firefox_policy_snapshot,
+    )
 
 SAFE_MODULE_PATH = re.compile(r"^/[a-zA-Z0-9_./\-]+\.so(\.[0-9]+)*$")
 
@@ -188,43 +123,6 @@ def validate_pkcs11_module_path(module_path: Optional[str]) -> Optional[str]:
     return real_path
 
 
-def get_certs_dir(override: str = None) -> str:
-    """Discover certificates directory across system, local, and user installs."""
-    system_store = "/usr/share/sentinel/certificates"
-    if os.path.isdir(system_store) and os.path.isdir(os.path.join(system_store, "all_cas")):
-        try:
-            if os.stat(system_store).st_uid == 0:
-                return system_store
-        except Exception:
-            pass
-
-    if override and os.path.isdir(override) and os.path.isdir(os.path.join(override, "all_cas")):
-        if not any(c in override for c in ("\r", "\n", "\0")):
-            return os.path.abspath(override)
-
-    candidates = [
-        "/usr/share/sentinel/certificates",
-        "/usr/libexec/sentinel/certificates",
-        os.path.join(SCRIPT_DIR, "certificates"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "certificates"),
-    ]
-
-    sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user:
-        try:
-            import pwd
-            u_home = pwd.getpwnam(sudo_user).pw_dir
-            candidates.append(os.path.join(u_home, ".local", "share", "sentinel_cac_manager", "certificates"))
-        except Exception:
-            pass
-
-    for c in candidates:
-        if os.path.isdir(c) and os.path.isdir(os.path.join(c, "all_cas")):
-            return c
-
-    return os.path.join(SCRIPT_DIR, "certificates")
-
-
 CERTS_DIR = get_certs_dir()
 ALL_CAS_DIR = os.path.join(CERTS_DIR, "all_cas")
 FULL_CHAIN_PEM = os.path.join(CERTS_DIR, "DoD_Full_Chain.pem")
@@ -272,13 +170,14 @@ def reset_smartcard_atr():
 
 
 def ensure_system_helper():
-    """Ensure privileged_helper.py is installed in root-owned /usr/libexec/sentinel/ (0755 root:root)."""
+    """Ensure privileged_helper.py and core modules are installed in root-owned /usr/libexec/sentinel/ (0755 root:root)."""
     try:
         sys_dir = "/usr/libexec/sentinel"
+        sys_core_dir = os.path.join(sys_dir, "core")
+        os.makedirs(sys_core_dir, exist_ok=True)
         sys_helper = os.path.join(sys_dir, "privileged_helper.py")
         current_script = os.path.abspath(__file__)
-        if current_script != sys_helper:
-            os.makedirs(sys_dir, exist_ok=True)
+        if current_script != sys_helper and os.path.isfile(current_script):
             with tempfile.NamedTemporaryFile(dir=sys_dir, delete=False) as f_tmp:
                 temp_dst = f_tmp.name
                 with open(current_script, "rb") as f_src:
@@ -289,7 +188,24 @@ def ensure_system_helper():
             except Exception:
                 pass
             os.replace(temp_dst, sys_helper)
-            log("Synchronized protected privileged helper to /usr/libexec/sentinel/privileged_helper.py")
+
+        src_core_dir = os.path.dirname(current_script) if os.path.basename(os.path.dirname(current_script)) == "core" else os.path.join(os.path.dirname(current_script), "core")
+        if os.path.isdir(src_core_dir):
+            for mod_name in ["ca_manifest.py", "ownership.py", "rust_bridge.py", "__init__.py"]:
+                src_mod = os.path.join(src_core_dir, mod_name)
+                if os.path.isfile(src_mod):
+                    dst_mod = os.path.join(sys_core_dir, mod_name)
+                    with tempfile.NamedTemporaryFile(dir=sys_core_dir, delete=False) as f_tmp:
+                        tmp_m = f_tmp.name
+                        with open(src_mod, "rb") as f_s:
+                            f_tmp.write(f_s.read())
+                    os.chmod(tmp_m, 0o644)
+                    try:
+                        os.chown(tmp_m, 0, 0)
+                    except Exception:
+                        pass
+                    os.replace(tmp_m, dst_mod)
+        log("Synchronized protected privileged helper and core modules to /usr/libexec/sentinel/")
     except Exception as e:
         log(f"System helper sync note: {e}")
 
@@ -376,219 +292,78 @@ def fix_opensc_hang() -> bool:
         return False
 
 
-SAFE_CERT_FILENAME = re.compile(r"^[a-zA-Z0-9_.-]+\.(crt|pem)$")
-PEM_CERT_PATTERN = re.compile(rb"-----BEGIN CERTIFICATE-----([\s\S]+?)-----END CERTIFICATE-----")
-
-
-def _extract_der_from_pem_body(b64_body: bytes) -> Optional[bytes]:
-    """Decode base64 body of a PEM certificate block into raw ASN.1 DER bytes."""
-    try:
-        cleaned = re.sub(rb"\s+", b"", b64_body)
-        der = base64.b64decode(cleaned, validate=True)
-        if len(der) >= 64 and der[0] == 0x30:
-            return der
-    except Exception:
-        pass
-    return None
-
-
-def _verify_x509_ca_properties(der_bytes: bytes, require_self_signed: bool = False) -> Optional[bytes]:
-    """Verify ASN.1 X.509 certificate structure, CA basic constraints, expiry, and self-signed root status.
-
-    Returns canonical PEM bytes on success, or None if validation fails.
-    """
-    # 1. Verify via OpenSSL CLI (handles all NIST/DoD RSA and ECDSA P-384 certificates reliably)
-    if shutil.which("openssl"):
-        try:
-            proc_check = subprocess.run(
-                [
-                    "openssl",
-                    "x509",
-                    "-inform",
-                    "DER",
-                    "-noout",
-                    "-subject",
-                    "-issuer",
-                    "-ext",
-                    "basicConstraints",
-                    "-checkend",
-                    "0",
-                ],
-                input=der_bytes,
-                capture_output=True,
-                timeout=5,
-            )
-            if proc_check.returncode != 0:
-                return None
-            out_text = proc_check.stdout.decode(errors="replace")
-            if "CA:TRUE" not in out_text:
-                return None
-
-            subj_line = ""
-            iss_line = ""
-            for line in out_text.splitlines():
-                if line.startswith("subject="):
-                    subj_line = line[len("subject="):].strip()
-                elif line.startswith("issuer="):
-                    iss_line = line[len("issuer="):].strip()
-
-            if not subj_line or not iss_line:
-                return None
-            if require_self_signed and subj_line != iss_line:
-                return None
-
-            proc_pem = subprocess.run(
-                ["openssl", "x509", "-inform", "DER", "-outform", "PEM"],
-                input=der_bytes,
-                capture_output=True,
-                timeout=5,
-            )
-            if proc_pem.returncode == 0 and b"-----BEGIN CERTIFICATE-----" in proc_pem.stdout:
-                return proc_pem.stdout.strip()
-        except Exception:
-            pass
-
-    # 2. Fallback to Python cryptography library if openssl binary is unavailable
-    try:
-        from datetime import datetime, timezone
-        from cryptography import x509
-        from cryptography.hazmat.primitives import serialization
-
-        cert = x509.load_der_x509_certificate(der_bytes)
-        if not cert.subject or not cert.issuer:
-            return None
-        if require_self_signed and cert.subject != cert.issuer:
-            return None
-        now = datetime.now(timezone.utc)
-        if hasattr(cert, "not_valid_after_utc") and cert.not_valid_after_utc <= now:
-            return None
-        bc = cert.extensions.get_extension_for_class(x509.BasicConstraints)
-        if not bc.value.ca:
-            return None
-        return cert.public_bytes(serialization.Encoding.PEM).strip()
-    except Exception:
-        return None
-
-
-def _validate_and_reserialize_cert(
-    data: bytes,
-    fname: str,
-    verify_whitelist: bool = True,
-) -> Optional[bytes]:
-    """Validate X.509 certificate data, DER fingerprints, and CA properties, returning canonical PEM."""
-    pem_bodies = PEM_CERT_PATTERN.findall(data)
-    if not pem_bodies:
-        log(f"Security: Rejected {fname}: contains no valid PEM certificate blocks")
-        return None
-
-    is_root_target = fname in DOD_ROOT_DER_FINGERPRINTS or fname in ("DoD_Roots.pem", "DoW_Roots.pem")
-    all_allowed_ders = set(DOD_CA_DER_FINGERPRINTS.values())
-    root_allowed_ders = set(DOD_ROOT_DER_FINGERPRINTS.values())
-
-    reserialized_certs = []
-    seen_der_hashes = []
-
-    for idx, body in enumerate(pem_bodies):
-        der_bytes = _extract_der_from_pem_body(body)
-        if not der_bytes:
-            log(f"Security: Rejected {fname}: block {idx + 1} has invalid base64 or ASN.1 sequence")
-            return None
-
-        der_sha256 = hashlib.sha256(der_bytes).hexdigest().lower()
-        seen_der_hashes.append(der_sha256)
-
-        if verify_whitelist:
-            if fname in DOD_CA_DER_FINGERPRINTS:
-                expected_der = DOD_CA_DER_FINGERPRINTS[fname]
-                if der_sha256 != expected_der:
-                    log(
-                        f"Security: DER fingerprint mismatch for '{fname}'! "
-                        f"Expected {expected_der}, got {der_sha256}"
-                    )
-                    return None
-            elif fname in ("DoD_Roots.pem", "DoW_Roots.pem"):
-                if der_sha256 not in root_allowed_ders:
-                    log(f"Security: Non-root certificate found inside root bundle '{fname}' ({der_sha256})")
-                    return None
-            elif fname in ("DoD_Full_Chain.pem", "DoD_Full_Chain.crt", "DoW_Full_Chain.pem", "DoW_Full_Chain.crt"):
-                if der_sha256 not in all_allowed_ders:
-                    log(f"Security: Unauthorized certificate block {idx + 1} in '{fname}' ({der_sha256})")
-                    return None
-            else:
-                log(f"Security: Rejected unauthorized certificate filename '{fname}'")
-                return None
-
-        validated_pem = _verify_x509_ca_properties(der_bytes, require_self_signed=is_root_target)
-        if not validated_pem:
-            if fname in ("DoD_Full_Chain.pem", "DoD_Full_Chain.crt", "DoW_Full_Chain.pem", "DoW_Full_Chain.crt"):
-                log(f"Skipping expired/retired intermediate block {idx + 1} in bundle '{fname}'")
-                continue
-            log(f"Security: Rejected {fname}: certificate block {idx + 1} failed X.509 CA/validity verification")
-            return None
-        reserialized_certs.append(validated_pem)
-
-    if verify_whitelist:
-        if fname in DOD_CA_DER_FINGERPRINTS and len(pem_bodies) != 1:
-            log(f"Security: Rejected '{fname}': single-certificate file contained {len(pem_bodies)} blocks")
-            return None
-        if fname in ("DoD_Roots.pem", "DoW_Roots.pem") and set(seen_der_hashes) != root_allowed_ders:
-            log(f"Security: Rejected '{fname}': root bundle does not contain all 4 required DoD Root CAs")
-            return None
-
-    if not reserialized_certs:
-        return None
-
-    return b"\n".join(reserialized_certs) + b"\n"
-
-
-def _file_content_matches_sentinel_manifest(filepath: str) -> bool:
-    """Return True only if filepath is a regular file whose content matches Sentinel's DoD CA manifest."""
-    if not os.path.isfile(filepath) or os.path.islink(filepath):
-        return False
-    fname = os.path.basename(filepath)
-    if fname not in DOD_CA_FINGERPRINTS and fname not in DOD_CA_DER_FINGERPRINTS:
-        return False
-    try:
-        with open(filepath, "rb") as f:
-            raw = f.read(5 * 1024 * 1024 + 1)
-        if len(raw) > 5 * 1024 * 1024:
-            return False
-        raw_sha256 = hashlib.sha256(raw).hexdigest().lower()
-        if raw_sha256 == DOD_CA_FINGERPRINTS.get(fname):
-            return True
-        pem_bodies = PEM_CERT_PATTERN.findall(raw)
-        if fname in DOD_CA_DER_FINGERPRINTS and len(pem_bodies) == 1:
-            der = _extract_der_from_pem_body(pem_bodies[0])
-            if der and hashlib.sha256(der).hexdigest().lower() == DOD_CA_DER_FINGERPRINTS[fname]:
-                return True
-        if fname in ("DoD_Roots.pem", "DoW_Roots.pem") and pem_bodies:
-            ders = [_extract_der_from_pem_body(b) for b in pem_bodies]
-            if all(ders) and {hashlib.sha256(d).hexdigest().lower() for d in ders if d} == set(DOD_ROOT_DER_FINGERPRINTS.values()):
-                return True
-        if fname in ("DoD_Full_Chain.pem", "DoD_Full_Chain.crt", "DoW_Full_Chain.pem", "DoW_Full_Chain.crt") and pem_bodies:
-            ders = [_extract_der_from_pem_body(b) for b in pem_bodies]
-            if all(ders) and {hashlib.sha256(d).hexdigest().lower() for d in ders if d}.issubset(set(DOD_CA_DER_FINGERPRINTS.values())):
-                return True
-    except Exception:
-        return False
-    return False
+_extract_der_from_pem_body = extract_der_from_pem_body
+_file_content_matches_sentinel_manifest = verify_file_matches_manifest
+_validate_and_reserialize_cert = validate_and_reserialize_cert
 
 
 def _remove_or_restore_sentinel_cert_file(filepath: str) -> bool:
-    """Remove filepath only if its content matches Sentinel's manifest, restoring any pre-Sentinel backup."""
+    """Remove filepath only if Sentinel installed it and it did not exist before,
+    restoring any pre-Sentinel file or symlink backup."""
     bak_path = f"{filepath}.pre-sentinel-bak"
+    sym_path = f"{filepath}.pre-sentinel-symlink"
+
     if not os.path.exists(filepath) and not os.path.islink(filepath):
+        remove_file_ownership_entry(filepath)
         return False
+
+    entry = get_file_ownership_entry(filepath)
+    existed_before = False
+    was_symlink = False
+    symlink_target = None
+    if entry:
+        existed_before = bool(entry.get("existed_before", False))
+        was_symlink = bool(entry.get("was_symlink", False))
+        symlink_target = entry.get("symlink_target")
+
     if os.path.islink(filepath):
-        try:
-            os.remove(filepath)
-            return True
-        except OSError:
+        if not entry and not os.path.exists(sym_path):
+            log(f"Preserving untracked administrator symlink: {filepath}")
             return False
+        if was_symlink and symlink_target:
+            remove_file_ownership_entry(filepath)
+            return True
 
     if not _file_content_matches_sentinel_manifest(filepath):
         log(f"Preserving administrator/non-Sentinel file: {filepath}")
+        remove_file_ownership_entry(filepath)
         return False
+
+    if existed_before:
+        if was_symlink:
+            target_to_restore = symlink_target
+            if not target_to_restore and os.path.isfile(sym_path):
+                try:
+                    with open(sym_path, "r", encoding="utf-8") as f_s:
+                        target_to_restore = f_s.read().strip()
+                except OSError:
+                    pass
+            if target_to_restore:
+                try:
+                    if os.path.exists(filepath) or os.path.islink(filepath):
+                        os.remove(filepath)
+                    os.symlink(target_to_restore, filepath)
+                    log(f"Restored pre-existing administrator symlink from {sym_path} to {filepath}")
+                    if os.path.isfile(sym_path):
+                        os.remove(sym_path)
+                    remove_file_ownership_entry(filepath)
+                    return True
+                except OSError as e:
+                    log(f"Failed to restore symlink {filepath}: {e}")
+                    return False
+        elif os.path.isfile(bak_path) and not os.path.islink(bak_path):
+            try:
+                os.replace(bak_path, filepath)
+                log(f"Restored pre-existing administrator file from {bak_path} to {filepath}")
+                remove_file_ownership_entry(filepath)
+                return True
+            except OSError as e:
+                log(f"Failed to restore backup {bak_path}: {e}")
+                return False
+        else:
+            log(f"Preserving pre-existing DoD certificate present before installation: {filepath}")
+            remove_file_ownership_entry(filepath)
+            return False
 
     try:
         if os.path.isfile(bak_path) and not os.path.islink(bak_path):
@@ -596,6 +371,12 @@ def _remove_or_restore_sentinel_cert_file(filepath: str) -> bool:
             log(f"Restored pre-existing administrator file from {bak_path} to {filepath}")
         else:
             os.remove(filepath)
+        if os.path.isfile(sym_path):
+            try:
+                os.remove(sym_path)
+            except OSError:
+                pass
+        remove_file_ownership_entry(filepath)
         return True
     except OSError:
         return False
@@ -656,7 +437,8 @@ def _read_and_validate_cert(src_path: str, expected_dir: str, verify_whitelist: 
 
 
 def _write_secure_cert(src_path: str, dst_path: str, expected_dir: str, verify_whitelist: bool = True) -> bool:
-    """Read, validate, and write certificate bytes with explicit non-executable mode 0644, preserving any pre-existing non-Sentinel file."""
+    """Read, validate, and write certificate bytes with explicit non-executable mode 0644,
+    failing closed if pre-existing file/symlink backup cannot be created or verified."""
     data = _read_and_validate_cert(src_path, expected_dir, verify_whitelist=verify_whitelist)
     if not data:
         log(f"Skipping unvalidated or insecure certificate source: {src_path}")
@@ -665,23 +447,57 @@ def _write_secure_cert(src_path: str, dst_path: str, expected_dir: str, verify_w
     dst_dir = os.path.dirname(dst_path)
     os.makedirs(dst_dir, exist_ok=True)
 
-    # Preserve pre-existing administrator file if its content differs from Sentinel's manifest
     bak_path = f"{dst_path}.pre-sentinel-bak"
-    if (
-        os.path.isfile(dst_path)
-        and not os.path.islink(dst_path)
-        and not _file_content_matches_sentinel_manifest(dst_path)
-        and not os.path.exists(bak_path)
-    ):
-        try:
-            with open(dst_path, "rb") as f_orig:
-                orig_bytes = f_orig.read()
-            fd_bak = os.open(bak_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-            with open(fd_bak, "wb") as f_bak:
-                f_bak.write(orig_bytes)
-            log(f"Backed up pre-existing administrator certificate to {bak_path}")
-        except OSError as e:
-            log(f"Backup notice for {dst_path}: {e}")
+    sym_path = f"{dst_path}.pre-sentinel-symlink"
+
+    existed_before = os.path.exists(dst_path) or os.path.islink(dst_path)
+    was_symlink = os.path.islink(dst_path)
+    symlink_target = None
+
+    if existed_before:
+        prior_entry = get_file_ownership_entry(dst_path)
+        if prior_entry:
+            existed_before = bool(prior_entry.get("existed_before", False))
+            was_symlink = bool(prior_entry.get("was_symlink", False))
+            symlink_target = prior_entry.get("symlink_target")
+        elif was_symlink:
+            try:
+                symlink_target = os.readlink(dst_path)
+                if not os.path.exists(sym_path):
+                    with tempfile.NamedTemporaryFile(mode="w", dir=dst_dir, delete=False, encoding="utf-8") as f_sym:
+                        tmp_sym = f_sym.name
+                        f_sym.write(symlink_target)
+                    os.chmod(tmp_sym, 0o600)
+                    os.replace(tmp_sym, sym_path)
+            except OSError as e:
+                log(f"Security: Failed to preserve pre-existing symlink for {dst_path}: {e}")
+                return False
+        elif os.path.isfile(dst_path):
+            if not _file_content_matches_sentinel_manifest(dst_path):
+                needs_backup = not (os.path.isfile(bak_path) and not os.path.islink(bak_path))
+                if needs_backup:
+                    try:
+                        with open(dst_path, "rb") as f_orig:
+                            orig_bytes = f_orig.read()
+                        orig_sha = hashlib.sha256(orig_bytes).hexdigest().lower()
+
+                        fd_bak = os.open(bak_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+                        with open(fd_bak, "wb") as f_bak:
+                            f_bak.write(orig_bytes)
+
+                        with open(bak_path, "rb") as f_verify:
+                            verify_sha = hashlib.sha256(f_verify.read()).hexdigest().lower()
+                        if verify_sha != orig_sha:
+                            log(f"Security: Backup verification failed for {dst_path}")
+                            try:
+                                os.remove(bak_path)
+                            except OSError:
+                                pass
+                            return False
+                        log(f"Backed up pre-existing certificate to {bak_path}")
+                    except OSError as e:
+                        log(f"Security: Failed to create verified backup for {dst_path}: {e}")
+                        return False
 
     temp_dst = None
     try:
@@ -689,7 +505,17 @@ def _write_secure_cert(src_path: str, dst_path: str, expected_dir: str, verify_w
             temp_dst = f_out.name
             f_out.write(data)
         os.chmod(temp_dst, 0o644)
+        new_sha256 = hashlib.sha256(data).hexdigest().lower()
         os.replace(temp_dst, dst_path)
+
+        record_installed_file(
+            target_path=dst_path,
+            installed_sha256=new_sha256,
+            pre_existing_backup=bak_path if os.path.isfile(bak_path) else None,
+            existed_before=existed_before,
+            was_symlink=was_symlink,
+            symlink_target=symlink_target,
+        )
         return True
     except Exception as e:
         log(f"Error writing certificate to {dst_path}: {e}")
@@ -699,6 +525,31 @@ def _write_secure_cert(src_path: str, dst_path: str, expected_dir: str, verify_w
             except Exception:
                 pass
         return False
+
+
+def deploy_shared_certificates(src_certs_dir: str, target_base: str = "/usr/share/sentinel/certificates") -> bool:
+    """Deploy validated DoD certificates into target_base using _write_secure_cert.
+    Ensures every certificate written matches the cryptographic DoD CA manifest."""
+    log(f"Deploying manifest-verified DoD certificates to {target_base}...")
+    if not os.path.isdir(src_certs_dir):
+        log(f"Source certificates directory not found: {src_certs_dir}")
+        return False
+
+    all_ok = True
+    subdirs = ["roots", "intermediates", "all_cas", ""]
+    for sub in subdirs:
+        s_dir = os.path.join(src_certs_dir, sub) if sub else src_certs_dir
+        d_dir = os.path.join(target_base, sub) if sub else target_base
+        if not os.path.isdir(s_dir):
+            continue
+        os.makedirs(d_dir, exist_ok=True)
+        for fname in sorted(os.listdir(s_dir)):
+            if fname.endswith((".crt", ".pem")) and os.path.isfile(os.path.join(s_dir, fname)):
+                src_f = os.path.join(s_dir, fname)
+                dst_f = os.path.join(d_dir, fname)
+                if not _write_secure_cert(src_f, dst_f, s_dir, verify_whitelist=True):
+                    all_ok = False
+    return all_ok
 
 
 def _clean_sentinel_owned_certs_in_dir(target_dir: str, keep_roots: bool = False) -> int:
@@ -844,28 +695,54 @@ def install_system_certificates(distro_family: str) -> bool:
 
 
 def merge_firefox_policy_file(target: str, module_path: str, cert_path: str) -> bool:
-    """Safely deep-merge Sentinel CAC settings into a Firefox policies.json file, recording pre-existing state."""
+    """Safely deep-merge Sentinel CAC settings into a Firefox policies.json file,
+    failing closed on malformed existing JSON or invalid structures, and detecting concurrent edits."""
     try:
         target_dir = os.path.dirname(target)
         os.makedirs(target_dir, exist_ok=True)
-        existing_data = {}
+
+        if os.path.islink(target):
+            log(f"Security: Rejected Firefox policy target because it is a symlink: {target}")
+            return False
+
         existed_before = os.path.isfile(target)
+        existing_data = {}
+        pre_read_sha = None
+
         if existed_before:
             try:
-                with open(target, "r", encoding="utf-8") as f_ex:
-                    loaded = json.load(f_ex)
-                    if isinstance(loaded, dict):
-                        existing_data = loaded
-            except Exception:
-                existing_data = {}
+                with open(target, "rb") as f_raw:
+                    raw_bytes = f_raw.read()
+                pre_read_sha = hashlib.sha256(raw_bytes).hexdigest().lower()
+                loaded = json.loads(raw_bytes.decode("utf-8"))
+                if not isinstance(loaded, dict):
+                    log(f"Security: Rejected {target}: root JSON element is not an object/dict")
+                    return False
+                existing_data = loaded
+            except Exception as e:
+                log(f"Security: Refusing to modify malformed Firefox policy in {target}: {e}")
+                return False
 
-        # Record pre-Sentinel snapshot once (O_CREAT | O_EXCL prevents overwriting initial snapshot)
+        policies = existing_data.get("policies")
+        if policies is not None and not isinstance(policies, dict):
+            log(f"Security: Rejected {target}: 'policies' key is not a dict")
+            return False
+        if policies is None:
+            policies = {}
+
+        for k in ("Certificates", "SecurityDevices", "Preferences"):
+            if k in policies and not isinstance(policies[k], dict):
+                log(f"Security: Rejected {target}: '{k}' is not a dict")
+                return False
+
+        # Record pre-Sentinel snapshot (fail-closed if snapshot write fails when file existed)
         snap_path = f"{target}.pre-sentinel-snap"
         if not os.path.exists(snap_path) and not os.path.islink(snap_path):
             try:
                 snap_payload = json.dumps(
                     {
                         "existed_before": existed_before,
+                        "initial_sha256": pre_read_sha,
                         "prior_data": json.loads(json.dumps(existing_data)),
                     },
                     indent=2,
@@ -873,19 +750,24 @@ def merge_firefox_policy_file(target: str, module_path: str, cert_path: str) -> 
                 fd_snap = os.open(snap_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with open(fd_snap, "w", encoding="utf-8") as f_snap:
                     f_snap.write(snap_payload)
-            except OSError:
-                pass
+            except OSError as e:
+                if existed_before:
+                    log(f"Security: Failed to create snapshot for {target}: {e}")
+                    return False
 
-        policies = existing_data.get("policies")
-        if not isinstance(policies, dict):
-            policies = {}
+        record_firefox_policy_snapshot(
+            policy_path=target,
+            existed_before=existed_before,
+            prior_policies_dict=policies if existed_before else None,
+            initial_sha256=pre_read_sha,
+        )
 
         # Deep merge Certificates
-        certs_block = policies.get("Certificates")
+        certs_block = policies.get("Certificates", {})
         if not isinstance(certs_block, dict):
             certs_block = {}
         certs_block["ImportEnterpriseRoots"] = True
-        install_list = certs_block.get("Install")
+        install_list = certs_block.get("Install", [])
         if not isinstance(install_list, list):
             install_list = []
         if cert_path not in install_list:
@@ -894,15 +776,21 @@ def merge_firefox_policy_file(target: str, module_path: str, cert_path: str) -> 
         policies["Certificates"] = certs_block
 
         # Deep merge SecurityDevices
-        sec_devices = policies.get("SecurityDevices")
+        sec_devices = policies.get("SecurityDevices", {})
         if not isinstance(sec_devices, dict):
             sec_devices = {}
         sec_devices["DoD CAC"] = module_path
-        sec_devices.pop("DoW CAC", None)
+
+        # Preserve pre-existing "DoW CAC" if it existed prior to Sentinel
+        prior_snap = get_firefox_policy_snapshot(target)
+        prior_p = prior_snap.get("prior_policies") if prior_snap else None
+        prior_sec = prior_p.get("SecurityDevices") if isinstance(prior_p, dict) else None
+        if not (prior_sec and "DoW CAC" in prior_sec):
+            sec_devices.pop("DoW CAC", None)
         policies["SecurityDevices"] = sec_devices
 
         # Deep merge Preferences
-        prefs = policies.get("Preferences")
+        prefs = policies.get("Preferences", {})
         if not isinstance(prefs, dict):
             prefs = {}
         prefs["security.default_personal_cert"] = "Ask Every Time"
@@ -912,13 +800,44 @@ def merge_firefox_policy_file(target: str, module_path: str, cert_path: str) -> 
         existing_data["policies"] = policies
         content = json.dumps(existing_data, indent=2)
 
-        with tempfile.NamedTemporaryFile(mode="w", dir=target_dir, delete=False, encoding="utf-8") as f_out:
-            tmp_name = f_out.name
-            f_out.write(content)
-        os.chmod(tmp_name, 0o644)
-        os.replace(tmp_name, target)
-        log(f"Configured Firefox policy in {target}")
-        return True
+        temp_dst = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=target_dir, delete=False, encoding="utf-8") as f_out:
+                temp_dst = f_out.name
+                f_out.write(content)
+            os.chmod(temp_dst, 0o644)
+
+            # Compare-and-swap (CAS) check
+            if existed_before and pre_read_sha:
+                try:
+                    with open(target, "rb") as f_cur:
+                        cur_sha = hashlib.sha256(f_cur.read()).hexdigest().lower()
+                    if cur_sha != pre_read_sha:
+                        log(f"Security: Concurrent modification detected on {target}; aborting write")
+                        try:
+                            os.remove(temp_dst)
+                        except OSError:
+                            pass
+                        return False
+                except OSError as e:
+                    log(f"Security: Failed CAS check on {target}: {e}")
+                    try:
+                        os.remove(temp_dst)
+                    except OSError:
+                        pass
+                    return False
+
+            os.replace(temp_dst, target)
+            log(f"Configured Firefox policy in {target}")
+            return True
+        except Exception as e:
+            if temp_dst and os.path.exists(temp_dst):
+                try:
+                    os.remove(temp_dst)
+                except OSError:
+                    pass
+            log(f"Firefox policy write error for {target}: {e}")
+            return False
     except Exception as e:
         log(f"Firefox policy note for {target}: {e}")
         return False
@@ -933,11 +852,19 @@ def revert_firefox_policy_file(target: str) -> bool:
     """
     snap_path = f"{target}.pre-sentinel-snap"
     prior_policies = {}
-    if os.path.isfile(snap_path) and not os.path.islink(snap_path):
+    existed_before = False
+
+    snap_entry = get_firefox_policy_snapshot(target)
+    if snap_entry:
+        existed_before = bool(snap_entry.get("existed_before", False))
+        if isinstance(snap_entry.get("prior_policies"), dict):
+            prior_policies = snap_entry["prior_policies"]
+    elif os.path.isfile(snap_path) and not os.path.islink(snap_path):
         try:
             with open(snap_path, "r", encoding="utf-8") as f_snap:
                 snap = json.load(f_snap)
             if isinstance(snap, dict) and snap.get("existed_before"):
+                existed_before = True
                 p_data = snap.get("prior_data")
                 if isinstance(p_data, dict) and isinstance(p_data.get("policies"), dict):
                     prior_policies = p_data["policies"]
@@ -950,6 +877,7 @@ def revert_firefox_policy_file(target: str) -> bool:
                 os.remove(snap_path)
             except OSError:
                 pass
+        remove_firefox_policy_snapshot(target)
         return True
 
     try:
@@ -965,14 +893,17 @@ def revert_firefox_policy_file(target: str) -> bool:
             prior_prefs = prior_policies.get("Preferences") if isinstance(prior_policies.get("Preferences"), dict) else {}
             prior_install = prior_certs.get("Install") if isinstance(prior_certs.get("Install"), list) else []
 
-            # 1. Clean SecurityDevices (preserve if "DoD CAC" was set prior to Sentinel)
+            # 1. Clean SecurityDevices (preserve if "DoD CAC" or "DoW CAC" was set prior to Sentinel)
             sec_devices = policies.get("SecurityDevices")
             if isinstance(sec_devices, dict):
                 if "DoD CAC" in prior_sec:
                     sec_devices["DoD CAC"] = prior_sec["DoD CAC"]
                 else:
                     sec_devices.pop("DoD CAC", None)
-                sec_devices.pop("DoW CAC", None)
+                if "DoW CAC" in prior_sec:
+                    sec_devices["DoW CAC"] = prior_sec["DoW CAC"]
+                else:
+                    sec_devices.pop("DoW CAC", None)
                 if not sec_devices and "SecurityDevices" not in prior_policies:
                     policies.pop("SecurityDevices", None)
 
@@ -1022,9 +953,8 @@ def revert_firefox_policy_file(target: str) -> bool:
                 if not prefs and "Preferences" not in prior_policies:
                     policies.pop("Preferences", None)
 
-        # Only delete the file if policies is completely empty AND no other top-level keys exist
         other_top_keys = [k for k in data.keys() if k != "policies"]
-        if not policies and not other_top_keys:
+        if not policies and not other_top_keys and not existed_before:
             os.remove(target)
             log(f"Removed empty Firefox policy file: {target}")
         else:
@@ -1042,6 +972,7 @@ def revert_firefox_policy_file(target: str) -> bool:
                 os.remove(snap_path)
             except OSError:
                 pass
+        remove_firefox_policy_snapshot(target)
         return True
     except Exception as e:
         log(f"Note reverting policy {target}: {e}")
@@ -1204,7 +1135,8 @@ def cleanup_legacy_smartcard_logon(distro_family: str) -> bool:
     """Cleanly roll back any legacy v2.0.0 PAM/SSSD workstation logon configuration."""
     ok = True
     legacy_sssd_dropin = "/etc/sssd/conf.d/sentinel-smartcard.conf"
-    if os.path.isfile(legacy_sssd_dropin):
+    had_sssd_dropin = os.path.isfile(legacy_sssd_dropin)
+    if had_sssd_dropin:
         try:
             os.remove(legacy_sssd_dropin)
             log(f"Removed legacy {legacy_sssd_dropin}")
@@ -1223,7 +1155,8 @@ def cleanup_legacy_smartcard_logon(distro_family: str) -> bool:
         except OSError:
             pass
 
-    if distro_family == "fedora" and shutil.which("authselect"):
+    # Only restore authselect backup on Fedora if Sentinel's legacy configuration was actually present
+    if distro_family == "fedora" and had_sssd_dropin and shutil.which("authselect"):
         if os.path.isdir("/var/lib/authselect/backups/sentinel_backup"):
             res = subprocess.run(
                 ["authselect", "backup-restore", "sentinel_backup"],
@@ -1236,11 +1169,13 @@ def cleanup_legacy_smartcard_logon(distro_family: str) -> bool:
                 ok = False
     elif distro_family == "debian" and shutil.which("pam-auth-update"):
         if os.path.isfile("/usr/share/pam-configs/sss-smart-card-optional"):
-            subprocess.run(
+            res = subprocess.run(
                 ["pam-auth-update", "--package", "--remove", "sss-smart-card-optional"],
                 capture_output=True,
                 text=True,
             )
+            if res.returncode != 0:
+                ok = False
 
     return ok
 
@@ -1338,7 +1273,8 @@ def uninstall_system_configuration(distro_family: str) -> bool:
                 log(f"Note restoring OpenSC config: {e}")
 
     # 5. Clean up any legacy SSSD/PAM smart card logon state from earlier versions
-    cleanup_legacy_smartcard_logon(distro_family)
+    if not cleanup_legacy_smartcard_logon(distro_family):
+        all_ok = False
 
     # 6. Remove Polkit policy and helper from /usr/libexec/sentinel
     polkit_policy = "/usr/share/polkit-1/actions/com.codefxr.sentinel.policy"
@@ -1354,6 +1290,9 @@ def uninstall_system_configuration(distro_family: str) -> bool:
         try:
             os.remove(helper_path)
             log("Removed /usr/libexec/sentinel/privileged_helper.py")
+            sys_core = "/usr/libexec/sentinel/core"
+            if os.path.isdir(sys_core):
+                shutil.rmtree(sys_core)
             if os.path.isdir("/usr/libexec/sentinel") and not os.listdir("/usr/libexec/sentinel"):
                 os.rmdir("/usr/libexec/sentinel")
         except Exception:
@@ -1368,6 +1307,7 @@ def main():
     parser.add_argument("--family", default="debian", help="distro family (debian/fedora/arch/suse)")
     parser.add_argument("--module", default=None, help="path to opensc module")
     parser.add_argument("--certs-dir", default=None, help="path to source certificates directory")
+    parser.add_argument("--deploy-shared-certs", default=None, help="deploy validated cert bundle to /usr/share/sentinel/certificates")
     parser.add_argument("--all", action="store_true", help="run all root setup steps")
     parser.add_argument("--packages", action="store_true", help="install system packages")
     parser.add_argument("--certs", action="store_true", help="install system certs only")
@@ -1383,6 +1323,10 @@ def main():
     if os.geteuid() != 0:
         log("ERROR: This helper must be run as root (via pkexec or sudo).")
         return 1
+
+    if args.deploy_shared_certs:
+        ok = deploy_shared_certificates(args.deploy_shared_certs)
+        return 0 if ok else 1
 
     if args.uninstall:
         ok = uninstall_system_configuration(args.family)

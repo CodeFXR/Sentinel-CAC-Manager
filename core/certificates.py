@@ -149,6 +149,29 @@ def _get_nss_cert_der_hash(certutil: str, db_dir: str, nickname: str) -> Optiona
         return None
 
 
+def _get_nss_cert_trust_flags(certutil: str, db_dir: str, nickname: str) -> Optional[str]:
+    """Query an NSS database for nickname and return its trust attributes string (e.g. 'CT,,')."""
+    try:
+        res = subprocess.run(
+            [certutil, "-d", f"sql:{db_dir}", "-L"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if res.returncode != 0 or not res.stdout:
+            return None
+        for line in res.stdout.splitlines():
+            line_str = line.strip()
+            if not line_str or line_str.startswith("Certificate Nickname") or line_str.startswith("SSL,S/MIME"):
+                continue
+            parts = line.rsplit(None, 1)
+            if len(parts) == 2 and parts[0].strip() == nickname:
+                return parts[1].strip()
+        return None
+    except Exception:
+        return None
+
+
 def _load_nss_ownership(db_dir: str) -> Dict[str, dict]:
     manifest_file = os.path.join(db_dir, ".sentinel_nss_manifest.json")
     if not os.path.isfile(manifest_file) or os.path.islink(manifest_file):
@@ -271,6 +294,28 @@ def import_root_cas_to_nss(
         existing_der = _get_nss_cert_der_hash(certutil, db_dir, nick)
         if existing_der is not None:
             if existing_der == expected_der:
+                existing_trust = _get_nss_cert_trust_flags(certutil, db_dir, nick) or ""
+                # For root CAs, verify 'C' is present in the SSL trust flags
+                if fname in DOD_ROOT_DER_FINGERPRINTS and "C" not in existing_trust:
+                    if nick in ownership and not ownership[nick].get("pre_existing"):
+                        res_m = subprocess.run(
+                            [certutil, "-d", f"sql:{db_dir}", "-M", "-n", nick, "-t", trust],
+                            capture_output=True,
+                            text=True,
+                            timeout=4,
+                        )
+                        if res_m.returncode == 0:
+                            success_count += 1
+                            if log_fn:
+                                log_fn(f"  [+] Repaired NSS trust attributes to {trust} for {nick}")
+                            continue
+                        else:
+                            errors.append(f"{nick}: Failed to update trust attributes in NSS DB: {res_m.stderr.strip()}")
+                            continue
+                    else:
+                        errors.append(f"{nick}: Pre-existing certificate in NSS DB lacks CA trust flags (has '{existing_trust}', requires '{trust}')")
+                        continue
+
                 if nick not in ownership:
                     ownership[nick] = {"pre_existing": True, "der_sha256": expected_der}
                 success_count += 1

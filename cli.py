@@ -54,6 +54,15 @@ def cmd_status():
     print(f"  Native Core Engine:    {rust_stat}")
     print(f"  PCSC Daemon (pcscd):   {'[ACTIVE]' if card_stat.service_active else '[INACTIVE]'}")
     print(f"  DoD System Trust:      {'[INSTALLED]' if certs_installed else '[NOT INSTALLED]'}")
+    from core.ca_manifest import check_bundled_ca_expirations, get_certs_dir
+    ca_exp_stat = check_bundled_ca_expirations(get_certs_dir())
+    if ca_exp_stat["expired"]:
+        ca_summary = f"[WARNING: {len(ca_exp_stat['expired'])} EXPIRED]"
+    elif ca_exp_stat["expiring_soon"]:
+        ca_summary = f"[NOTICE: {len(ca_exp_stat['expiring_soon'])} EXPIRING SOON]"
+    else:
+        ca_summary = f"[VALID: {len(ca_exp_stat['valid'])} UNEXPIRED]"
+    print(f"  Bundled DoD CAs:       {ca_summary}")
     print(f"  Firefox Profiles:      {b_stat.firefox_profiles_count} detected")
     print(f"  Firefox Policy:        {'[ACTIVE]' if b_stat.firefox_policy_active else '[NOT CONFIGURED]'}")
     print(f"  Firefox Prompting:     {'[Ask Every Time]' if b_stat.firefox_prompt_configured else '[Select Auto]'}")

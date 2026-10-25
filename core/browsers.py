@@ -535,10 +535,29 @@ def check_browsers_status() -> BrowserStatus:
     for pc in policy_candidates:
         if os.path.isfile(pc):
             try:
-                with open(pc, encoding="utf-8", errors="replace") as f:
-                    if "DoW CAC" in f.read() or "DoD CAC" in f.read():
-                        ff_policy_active = True
-                        break
+                with open(pc, "r", encoding="utf-8") as f:
+                    pol_data = json.load(f)
+                if isinstance(pol_data, dict) and isinstance(pol_data.get("policies"), dict):
+                    p_block = pol_data["policies"]
+                    sec = p_block.get("SecurityDevices", {})
+                    if isinstance(sec, dict):
+                        for dev_name in ("DoD CAC", "DoW CAC"):
+                            if dev_name in sec:
+                                dev_path = sec[dev_name]
+                                if dev_path and os.path.isfile(dev_path):
+                                    ff_policy_active = True
+                                    break
+                    if ff_policy_active:
+                        certs_cfg = p_block.get("Certificates", {})
+                        if isinstance(certs_cfg, dict) and "Install" in certs_cfg:
+                            inst_list = certs_cfg.get("Install", [])
+                            if isinstance(inst_list, list):
+                                for c_p in inst_list:
+                                    if not os.path.isfile(c_p):
+                                        ff_policy_active = False
+                                        break
+                        if ff_policy_active:
+                            break
             except Exception:
                 pass
 
@@ -560,7 +579,13 @@ def check_browsers_status() -> BrowserStatus:
                 with open(p11, encoding="utf-8", errors="replace") as f:
                     content = f.read()
                     if "DoW CAC" in content or "DoD CAC" in content or "opensc-pkcs11" in content or "p11-kit-proxy" in content:
-                        ff_module = True
+                        lib_match = re.search(r"library\s*=\s*([^\r\n]+)", content)
+                        if lib_match:
+                            lib_p = lib_match.group(1).strip()
+                            if os.path.isfile(lib_p):
+                                ff_module = True
+                        else:
+                            ff_module = True
             except Exception:
                 pass
 
@@ -581,8 +606,15 @@ def check_browsers_status() -> BrowserStatus:
                 text=True,
                 timeout=6,
             )
-            if "DoW CAC" in res.stdout or "DoD CAC" in res.stdout or "p11-kit-proxy" in res.stdout or "OpenSC" in res.stdout:
-                chrome_module = True
+            out_str = res.stdout
+            if "DoW CAC" in out_str or "DoD CAC" in out_str or "p11-kit-proxy" in out_str or "OpenSC" in out_str:
+                lib_match = re.search(r"library name:\s*([^\r\n]+)", out_str, re.IGNORECASE)
+                if lib_match:
+                    lib_p = lib_match.group(1).strip()
+                    if os.path.isfile(lib_p) or lib_p.endswith("p11-kit-proxy.so"):
+                        chrome_module = True
+                else:
+                    chrome_module = True
         except Exception:
             pass
 

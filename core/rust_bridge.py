@@ -33,11 +33,18 @@ def _ensure_init():
 
     # 1. Try standard Python import
     try:
+        from core import __version__
         import sentinel_core as sc
-        _sentinel_core = sc
-        IS_RUST_AVAILABLE = True
-        logger.debug("Loaded sentinel_core via standard sys.path import.")
-        return
+        if hasattr(sc, "version") and sc.version() != __version__:
+            logger.warning(
+                f"Native module version {sc.version()} differs from application version {__version__}; "
+                "ignoring stale native library."
+            )
+        else:
+            _sentinel_core = sc
+            IS_RUST_AVAILABLE = True
+            logger.debug("Loaded sentinel_core via standard sys.path import.")
+            return
     except ImportError:
         pass
 
@@ -60,6 +67,14 @@ def _ensure_init():
                     mod = importlib.util.module_from_spec(spec)
                     sys.modules["sentinel_core"] = mod
                     spec.loader.exec_module(mod)
+                    mod_ver = getattr(mod, "version", lambda: None)()
+                    from core import __version__
+                    if mod_ver and mod_ver != __version__:
+                        logger.warning(
+                            f"Native module {p} version {mod_ver} differs from application version {__version__}; "
+                            "ignoring stale native library."
+                        )
+                        continue
                     _sentinel_core = mod
                     IS_RUST_AVAILABLE = True
                     logger.debug(f"Loaded sentinel_core native module from: {p}")
@@ -297,6 +312,75 @@ def query_native_pcsc_rust():
     return None
 
 
+def _query_pin_status_cli_fallback(reader_name: Optional[str] = None) -> Tuple[bool, int, str]:
+    """Pure-Python / CLI fallback to query PIN retry counter via opensc-tool or pkcs11-tool."""
+    import re
+    import shutil
+    import subprocess
+
+    tool = shutil.which("opensc-tool")
+    if tool:
+        try:
+            cmd = [tool, "-s", "00:a4:04:00:0b:a0:00:00:03:08:00:00:10:00:01:00", "-s", "00:20:00:80:00"]
+            if reader_name:
+                cmd.extend(["-r", reader_name])
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            for line in res.stdout.splitlines():
+                line_clean = line.strip().replace(" ", "").upper()
+                if "63C" in line_clean:
+                    m = re.search(r"63C([0-9A-F])", line_clean)
+                    if m:
+                        retries = int(m.group(1), 16)
+                        return True, retries, f"{retries} attempt(s) remaining"
+                elif "9000" in line_clean and "00200080" in line_clean:
+                    return True, 3, "PIN operational (verified session)"
+        except Exception as e:
+            logger.debug(f"opensc-tool PIN query note: {e}")
+
+    p11_tool = shutil.which("pkcs11-tool")
+    if p11_tool:
+        try:
+            res = subprocess.run([p11_tool, "--list-slots"], capture_output=True, text=True, timeout=5)
+            for line in res.stdout.splitlines():
+                l_low = line.lower()
+                if "flags:" in l_low and "user pin" in l_low:
+                    if "final try" in l_low:
+                        return True, 1, "1 attempt remaining (FINAL TRY)"
+                    elif "locked" in l_low:
+                        return True, 0, "PIN locked"
+                    return True, 3, "PIN operational"
+        except Exception as e:
+            logger.debug(f"pkcs11-tool PIN query note: {e}")
+
+    return False, 0, "Native smart card engine unavailable (opensc-tool / pkcs11-tool not found or reader empty)"
+
+
+def _change_pin_cli_fallback(old_pin: str, new_pin: str, reader_name: Optional[str] = None) -> Tuple[bool, int, str]:
+    """Pure-Python / CLI fallback to change PIN via pkcs11-tool."""
+    import os
+    import shutil
+    import subprocess
+
+    p11_tool = shutil.which("pkcs11-tool")
+    if p11_tool:
+        try:
+            from core.privileged_helper import find_default_opensc_module
+            mod_path = find_default_opensc_module()
+            cmd = [p11_tool, "--change-pin", "--pin", old_pin, "--new-pin", new_pin]
+            if mod_path and os.path.isfile(mod_path):
+                cmd.extend(["--module", mod_path])
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if res.returncode == 0:
+                return True, 3, "PIN changed successfully"
+            else:
+                err = res.stderr.strip() or res.stdout.strip()
+                return False, 0, f"PIN change failed: {err}"
+        except Exception as e:
+            return False, 0, f"PIN change error: {e}"
+
+    return False, 0, "Native smart card engine unavailable (pkcs11-tool not installed)"
+
+
 def query_pin_status_rust(reader_name: Optional[str] = None) -> Tuple[bool, int, str]:
     """Query PIV cardholder PIN retry counter non-destructively.
 
@@ -309,7 +393,7 @@ def query_pin_status_rust(reader_name: Optional[str] = None) -> Tuple[bool, int,
         except Exception as e:
             logger.debug(f"Rust query_pin_status failed: {e}")
             return False, 0, f"PIN query failure: {e}"
-    return False, 0, "Native smart card engine unavailable"
+    return _query_pin_status_cli_fallback(reader_name)
 
 
 def change_pin_rust(old_pin: str, new_pin: str, reader_name: Optional[str] = None) -> Tuple[bool, int, str]:
@@ -331,7 +415,7 @@ def change_pin_rust(old_pin: str, new_pin: str, reader_name: Optional[str] = Non
         except Exception as e:
             logger.debug(f"Rust change_pin failed: {e}")
             return False, 0, f"PIN change failure: {e}"
-    return False, 0, "Native smart card engine unavailable"
+    return _change_pin_cli_fallback(old_pin, new_pin, reader_name)
 
 
 def wait_for_card_event_rust(timeout_ms: int = 3000) -> Optional[Tuple[str, bool]]:

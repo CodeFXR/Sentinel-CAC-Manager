@@ -16,7 +16,7 @@ if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
 fi
 
 INSTALL_DIR="${TARGET_HOME}/.local/share/sentinel_cac_manager"
-RELEASE_TAG="v2.0.2"
+RELEASE_TAG="v2.0.3"
 REPO_URL="https://github.com/CodeFXR/Sentinel-CAC-Manager/releases/download/${RELEASE_TAG}/Sentinel-CAC-Manager.tar.gz"
 # Optional override via SENTINEL_ARCHIVE_SHA256 for verified standalone web bootstrap
 EXPECTED_ARCHIVE_SHA256="${SENTINEL_ARCHIVE_SHA256:-}"
@@ -173,12 +173,17 @@ install_system_deps_and_certs() {
         systemctl enable --now pcscd.socket pcscd 2>/dev/null || true
     fi
 
-    # Deploy protected privileged helper to /usr/libexec/sentinel/ (0755 root:root)
+    # Deploy protected privileged helper and core modules to /usr/libexec/sentinel/ (0755 root:root)
     echo "[+] Deploying protected privileged helper to /usr/libexec/sentinel/..."
-    mkdir -p /usr/libexec/sentinel
+    mkdir -p /usr/libexec/sentinel/core
     cp -f "${SCRIPT_DIR}/core/privileged_helper.py" /usr/libexec/sentinel/privileged_helper.py
-    chown root:root /usr/libexec/sentinel/privileged_helper.py
+    cp -f "${SCRIPT_DIR}/core/ca_manifest.py" /usr/libexec/sentinel/core/ca_manifest.py
+    cp -f "${SCRIPT_DIR}/core/ownership.py" /usr/libexec/sentinel/core/ownership.py
+    cp -f "${SCRIPT_DIR}/core/rust_bridge.py" /usr/libexec/sentinel/core/rust_bridge.py
+    touch /usr/libexec/sentinel/core/__init__.py
+    chown -R root:root /usr/libexec/sentinel
     chmod 0755 /usr/libexec/sentinel/privileged_helper.py
+    chmod 0644 /usr/libexec/sentinel/core/*.py
 
     # Deploy dedicated Polkit policy action if present
     if [ -f "${SCRIPT_DIR}/polkit/com.codefxr.sentinel.policy" ]; then
@@ -190,12 +195,8 @@ install_system_deps_and_certs() {
 
     # Deploy DoD CA certificates to system directory and validate trust anchors (SEC-01)
     if [ -d "${SCRIPT_DIR}/certificates" ]; then
-        echo "[+] Deploying DoD CA certificates to /usr/share/sentinel/certificates/..."
-        mkdir -p /usr/share/sentinel/certificates
-        cp -rf "${SCRIPT_DIR}/certificates/"* /usr/share/sentinel/certificates/
-        chmod -R 0644 /usr/share/sentinel/certificates/* 2>/dev/null || true
-        find /usr/share/sentinel/certificates -type d -exec chmod 0755 {} + 2>/dev/null || true
-
+        echo "[+] Deploying DoD CA certificates via validated privileged helper..."
+        python3 /usr/libexec/sentinel/privileged_helper.py --deploy-shared-certs "${SCRIPT_DIR}/certificates"
         # Install system certificates into trust store via validated privileged helper
         python3 /usr/libexec/sentinel/privileged_helper.py --certs --family "${FAMILY}" --certs-dir /usr/share/sentinel/certificates
     fi

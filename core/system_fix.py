@@ -11,6 +11,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -61,10 +62,17 @@ def get_helper_script(require_root_owned: bool = True) -> Optional[str]:
 
 
 def is_opensc_config_optimized(content: str) -> bool:
-    """Return True if card_drivers = cac, piv; is active on an uncommented line."""
-    for raw_line in content.splitlines():
-        uncommented = raw_line.split("#", 1)[0].strip()
-        if "card_drivers" in uncommented and "cac" in uncommented and "piv" in uncommented and "=" in uncommented:
+    """Return True if an uncommented card_drivers line in opensc.conf includes piv-II."""
+    try:
+        from core.rust_bridge import is_opensc_config_optimized_rust
+        rust_opt = is_opensc_config_optimized_rust(content)
+        if rust_opt is not None:
+            return rust_opt
+    except Exception:
+        pass
+    for line in content.splitlines():
+        uncommented = line.split("#", 1)[0].strip()
+        if "card_drivers" in uncommented and ("piv-II" in uncommented or "PIV-II" in uncommented or ("cac" in uncommented and "piv" in uncommented)):
             return True
     return False
 
@@ -121,7 +129,7 @@ def run_privileged_helper(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            start_new_session=True,
+            start_new_session=not sys.stdin.isatty(),
         )
     except Exception as e:
         return False, f"Failed to spawn elevated helper process: {e}"
@@ -297,10 +305,13 @@ def run_full_setup(
 
     if not card_stat.service_active:
         browser_errors.append("Smart card daemon (pcscd) is not active after setup.")
-    if not ff_ready:
+    if b_stat.firefox_installed and not ff_ready:
         browser_errors.append("Firefox policy and PKCS#11 security device could not be verified.")
-    if not chrome_ready:
+    if b_stat.chrome_installed and not chrome_ready:
         browser_errors.append("Chrome/Chromium NSS database (~/.pki/nssdb) PKCS#11 module could not be verified.")
+    if not b_stat.firefox_installed and not b_stat.chrome_installed:
+        if not b_stat.firefox_policy_active and not b_stat.chrome_db_exists:
+            browser_errors.append("Neither Firefox nor Chrome/NSS could be verified as configured.")
 
     if not trust_verified:
         result["success"] = False
